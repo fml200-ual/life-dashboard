@@ -93,7 +93,7 @@ propia y opaca.
 
 ## Seguridad
 
-- Ningún secreto se versiona: `.env*` está ignorado salvo `.env.example`.
+- Ningún secreto se versiona: `.env*` está ignorado; no hay plantilla con credenciales en el repo.
 - Las acciones de servidor rechazan operaciones que no pertenezcan al usuario.
 - El token de sesión solo viaja en cookie httpOnly; el `tokenHash` en BD impide
   su reutilización desde las cabeceras.

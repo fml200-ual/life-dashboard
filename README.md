@@ -21,18 +21,15 @@ Pomodoro persistente, notas con autoguardado y ajustes. Aplicación de **cuenta
 ```bash
 npm install
 
-# 1) Conexión y credenciales
-cp .env.example .env
-
-# 2) Rellena en .env:
+# 1) Crea un .env (no se versiona) con:
 #    DATABASE_URL (PostgreSQL con sslmode=require)
 #    ADMIN_EMAIL / ADMIN_PASSWORD / ADMIN_NAME / ADMIN_TIMEZONE
 
-# 3) Primera migración y cuenta autorizada
+# 2) Primera migración y cuenta autorizada
 npm run db:migrate
 npm run db:seed
 
-# 4) Entorno local
+# 3) Entorno local
 npm run dev
 ```
 
@@ -71,7 +68,7 @@ prisma/schema.prisma   Esquema de datos
 
 ## Despliegue (Vercel)
 
-1. Importa el repositorio y define las variables de entorno (ver `.env.example`).
+1. Importa el repositorio y define las variables de entorno (`DATABASE_URL`).
 2. El `postinstall` regenera el cliente Prisma automáticamente.
 3. Aplica la migración con `npm run db:deploy` y siembra una vez con
    `npm run db:seed` (desde tu equipo contra la misma base).
