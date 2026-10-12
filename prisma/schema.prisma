@@ -1,0 +1,230 @@
+// Life Dashboard - esquema de datos
+// PostgreSQL gestionado (Neon) + driver adapter pg (serverless/Vercel).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum PomodoroPhase {
+  WORK
+  SHORT_BREAK
+  LONG_BREAK
+}
+
+enum ThemePreference {
+  LIGHT
+  DARK
+  SYSTEM
+}
+
+enum IntegrationProvider {
+  GOOGLE
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  passwordHash String
+  timezone     String   @default("Europe/Madrid")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions     Session[]
+  categories   Category[]
+  tags         Tag[]
+  tasks        Task[]
+  notes        Note[]
+  pomodoros    PomodoroSession[]
+  preferences  UserPreferences?
+  streakDays   StreakDay[]
+  integrations IntegrationConfig[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  userAgent String?
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Category {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  color     String   @default("#6366f1")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tasks      Task[]
+  streakDays StreakDay[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+model Tag {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  color     String   @default("#94a3b8")
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tasks TaskTag[]
+  notes NoteTag[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+model Task {
+  id          String       @id @default(cuid())
+  userId      String
+  title       String
+  description String?
+  status      TaskStatus   @default(TODO)
+  priority    TaskPriority @default(MEDIUM)
+  dueDate     DateTime?
+  completedAt DateTime?
+  categoryId  String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category Category?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  tags     TaskTag[]
+  pomodoros PomodoroSession[]
+
+  @@index([userId, status])
+  @@index([userId, dueDate])
+  @@index([categoryId])
+}
+
+model TaskTag {
+  taskId String
+  tagId  String
+  task   Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  tag    Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, tagId])
+  @@index([tagId])
+}
+
+model Note {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String
+  content   String   @default("")
+  pinned    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tags NoteTag[]
+
+  @@index([userId, updatedAt])
+}
+
+model NoteTag {
+  noteId String
+  tagId  String
+  note   Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  tag    Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([noteId, tagId])
+  @@index([tagId])
+}
+
+model PomodoroSession {
+  id             String        @id @default(cuid())
+  userId         String
+  taskId         String?
+  phase          PomodoroPhase @default(WORK)
+  plannedSeconds Int
+  startedAt      DateTime
+  endedAt        DateTime?
+  completed      Boolean       @default(false)
+  createdAt      DateTime      @default(now())
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  task Task? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@index([userId, startedAt])
+  @@index([taskId])
+}
+
+model UserPreferences {
+  id                   String          @id @default(cuid())
+  userId               String          @unique
+  theme                ThemePreference @default(SYSTEM)
+  workMinutes          Int             @default(25)
+  shortBreakMinutes    Int             @default(5)
+  longBreakMinutes     Int             @default(15)
+  longBreakInterval    Int             @default(4)
+  dailyPomodoroGoal    Int             @default(8)
+  notificationsEnabled Boolean         @default(true)
+  updatedAt            DateTime        @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Racha por categoría y día. `date` es una fecha local "YYYY-MM-DD"
+// para no desfasar el día al convertir a UTC.
+model StreakDay {
+  id         String   @id @default(cuid())
+  userId     String
+  categoryId String
+  date       String
+  count      Int      @default(1)
+  updatedAt  DateTime @updatedAt
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, categoryId, date])
+  @@index([userId, date])
+}
+
+// Configuración de integraciones externas (p. ej. Gmail/OAuth).
+// Los tokens se guardan cifrados en el servidor y nunca se exponen al cliente.
+model IntegrationConfig {
+  id           String              @id @default(cuid())
+  userId       String
+  provider     IntegrationProvider
+  accountEmail String?
+  accessToken  String?
+  refreshToken String?
+  scope        String?
+  expiresAt    DateTime?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
+}
