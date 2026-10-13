@@ -3,6 +3,7 @@ import Link from "next/link";
 import { Badge, Card, CardContent, CardHeader, CardTitle, EmptyState } from "@/components/ui";
 import { computeStreak, addDaysToKey, todayKey, toDateKey } from "@/lib/date";
 import { prisma } from "@/lib/db";
+import { formatTaskTime } from "@/lib/task-time";
 import { requireUser } from "@/lib/auth";
 
 const STATUS_LABEL: Record<string, string> = {
@@ -37,6 +38,16 @@ export default async function DashboardPage() {
     prisma.task.findMany({
       where: { userId: user.id },
       orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        priority: true,
+        completedAt: true,
+        dueDate: true,
+        createdAt: true,
+        accumulatedSeconds: true,
+      },
     }),
     prisma.category.findMany({
       where: { userId: user.id },
@@ -241,7 +252,12 @@ export default async function DashboardPage() {
               {doneToday.slice(0, 5).map((task) => (
                 <li key={task.id} className="flex items-center gap-2 py-2">
                   <span className="text-emerald-500">✓</span>
-                  <span className="min-w-0 flex-1 truncate text-sm">{task.title}</span>
+                  <span className="min-w-0 flex-1 text-sm">
+                    <span className="block truncate">{task.title}</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Tiempo invertido: {formatTaskTime(task.accumulatedSeconds)}
+                    </span>
+                  </span>
                   <Badge>{PRIORITY_LABEL[task.priority]}</Badge>
                 </li>
               ))}
@@ -282,8 +298,13 @@ export default async function DashboardPage() {
               {pendingTasks.slice(0, 8).map((task) => (
                 <li key={task.id} className="flex items-center gap-3 py-2.5">
                   <span className="h-2 w-2 shrink-0 rounded-full bg-primary" />
-                  <span className="min-w-0 flex-1 truncate text-sm">{task.title}</span>
-                  <span className="shrink-0 text-xs text-muted-foreground">
+                  <span className="min-w-0 flex-1 text-sm">
+                    <span className="block truncate">{task.title}</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Tiempo invertido: {formatTaskTime(task.accumulatedSeconds)}
+                    </span>
+                  </span>
+                  <span className="shrink-0 text-right text-xs text-muted-foreground">
                     {STATUS_LABEL[task.status]} · {PRIORITY_LABEL[task.priority]}
                   </span>
                 </li>

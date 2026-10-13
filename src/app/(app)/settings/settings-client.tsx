@@ -18,6 +18,7 @@ type Prefs = {
   longBreakInterval: number;
   dailyPomodoroGoal: number;
   notificationsEnabled: boolean;
+  autoAdvance: boolean;
 };
 
 const initialResult: SettingsResult = { ok: true };
@@ -204,6 +205,20 @@ export function SettingsClient({
                 className="h-4 w-4 rounded border-border accent-primary"
               />
               Notificaciones del temporizador
+            </label>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                name="autoAdvance"
+                defaultChecked={prefs.autoAdvance}
+                className="mt-0.5 h-4 w-4 rounded border-border accent-primary"
+              />
+              <span>
+                <span className="block">Auto-avance de fases</span>
+                <span className="block text-xs text-muted-foreground">
+                  Iniciar automáticamente el siguiente período al terminar.
+                </span>
+              </span>
             </label>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <Button type="submit" disabled={pomodoroPending}>

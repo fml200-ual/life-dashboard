@@ -4,6 +4,21 @@ import { useEffect, useRef, useState } from "react";
 
 import { completePomodoroAction } from "@/app/actions/pomodoro";
 import { Button, Card } from "@/components/ui";
+import { toDateKey } from "@/lib/date";
+import {
+  calculateActiveSeconds,
+  getCompletedWorkSessionsTodayAfterCompletion,
+  getNextPomodoroPhase,
+  parsePomodoroState,
+  recoverPomodoroState,
+  serializePomodoroState,
+  type StoredPomodoroState,
+} from "@/lib/pomodoro";
+import {
+  createCompletionStopSignal,
+  finishPomodoroPhase,
+  type CompletionStopIntent,
+} from "@/lib/pomodoro-completion";
 import { cn } from "@/lib/utils";
 
 type Mode = "WORK" | "SHORT_BREAK" | "LONG_BREAK";
@@ -11,12 +26,7 @@ type Mode = "WORK" | "SHORT_BREAK" | "LONG_BREAK";
 const STORAGE_KEY = "ld-pomodoro";
 const MAX_PAUSE_MS = 1000 * 60 * 60 * 24; // 24 h
 
-type Stored = {
-  mode: Mode;
-  endAt: number; // epoch ms, 0 si está en pausa
-  remainingSeconds: number;
-  plannedSeconds: number;
-};
+type Stored = StoredPomodoroState;
 
 type Bootstrap = {
   mode: Mode;
@@ -25,6 +35,12 @@ type Bootstrap = {
   running: boolean;
   paused: boolean;
   endAt: number;
+  taskId: string | null;
+  cycleTaskId: string | null;
+  accumulatedActiveSeconds: number;
+  segmentStartedAt: number | null;
+  sessionStartedAt: number | null;
+  savedAt: number;
   status: string | null;
 };
 
@@ -35,7 +51,10 @@ type Prefs = {
   longBreakInterval: number;
   dailyPomodoroGoal: number;
   notificationsEnabled: boolean;
+  autoAdvance: boolean;
 };
+
+type PendingTask = { id: string; title: string };
 
 const MODE_LABEL: Record<Mode, string> = {
   WORK: "Concentración",
@@ -62,23 +81,14 @@ function readStorage(): Stored | null {
       return null;
     }
 
-    const parsed = JSON.parse(raw) as Stored;
-    if (
-      parsed.mode !== "WORK" &&
-      parsed.mode !== "SHORT_BREAK" &&
-      parsed.mode !== "LONG_BREAK"
-    ) {
-      return null;
-    }
-
-    return parsed;
+    return parsePomodoroState(raw);
   } catch {
     return null;
   }
 }
 
 function writeStorage(stored: Stored): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+  localStorage.setItem(STORAGE_KEY, serializePomodoroState(stored));
 }
 
 function clearStorage(): void {
@@ -98,12 +108,18 @@ function minutesToSeconds(minutes: number): number {
 
 export function PomodoroClient({
   prefs,
+  tasks,
   todayCount,
+  today,
+  timeZone,
   totalPomodoros,
   totalMinutes,
 }: {
   prefs: Prefs;
+  tasks: PendingTask[];
   todayCount: number;
+  today: string;
+  timeZone: string;
   totalPomodoros: number;
   totalMinutes: number;
 }) {
@@ -122,27 +138,40 @@ export function PomodoroClient({
   const [bootstrap] = useState<Bootstrap>(() => {
     const stored = readStorage();
     const now = Date.now();
+    const recovered = recoverPomodoroState(stored, now, MAX_PAUSE_MS);
 
-    if (stored && stored.endAt > 0 && stored.endAt > now && stored.endAt - now < MAX_PAUSE_MS) {
+    if (recovered && recovered.endAt > 0) {
       return {
-        mode: stored.mode,
-        plannedSeconds: stored.plannedSeconds,
-        remaining: Math.ceil((stored.endAt - now) / 1000),
+        mode: recovered.mode,
+        plannedSeconds: recovered.plannedSeconds,
+        remaining: Math.ceil((recovered.endAt - now) / 1000),
         running: true,
         paused: false,
-        endAt: stored.endAt,
-        status: `Sesión reanudada · ${MODE_LABEL[stored.mode].toLowerCase()}`,
+        endAt: recovered.endAt,
+        taskId: recovered.taskId,
+        cycleTaskId: recovered.cycleTaskId ?? recovered.taskId,
+        accumulatedActiveSeconds: recovered.accumulatedActiveSeconds,
+        segmentStartedAt: recovered.segmentStartedAt,
+        sessionStartedAt: recovered.sessionStartedAt,
+        savedAt: recovered.savedAt,
+        status: `Sesión reanudada · ${MODE_LABEL[recovered.mode].toLowerCase()}`,
       };
     }
 
-    if (stored && stored.endAt === 0 && stored.remainingSeconds > 0) {
+    if (recovered && recovered.endAt === 0) {
       return {
-        mode: stored.mode,
-        plannedSeconds: stored.plannedSeconds,
-        remaining: stored.remainingSeconds,
+        mode: recovered.mode,
+        plannedSeconds: recovered.plannedSeconds,
+        remaining: recovered.remainingSeconds,
         running: false,
         paused: true,
         endAt: 0,
+        taskId: recovered.taskId,
+        cycleTaskId: recovered.cycleTaskId ?? recovered.taskId,
+        accumulatedActiveSeconds: recovered.accumulatedActiveSeconds,
+        segmentStartedAt: null,
+        sessionStartedAt: recovered.sessionStartedAt,
+        savedAt: recovered.savedAt,
         status: "Sesión en pausa reanudada",
       };
     }
@@ -154,6 +183,12 @@ export function PomodoroClient({
       running: false,
       paused: false,
       endAt: 0,
+      taskId: null,
+      cycleTaskId: null,
+      accumulatedActiveSeconds: 0,
+      segmentStartedAt: null,
+      sessionStartedAt: null,
+      savedAt: 0,
       status: null,
     };
   });
@@ -164,50 +199,108 @@ export function PomodoroClient({
   const [running, setRunning] = useState(bootstrap.running);
   const [paused, setPaused] = useState(bootstrap.paused);
   const [status, setStatus] = useState<string | null>(bootstrap.status);
+  const [taskId, setTaskId] = useState<string | null>(bootstrap.taskId);
   const [completedToday, setCompletedToday] = useState(todayCount);
   const [totalDone, setTotalDone] = useState(totalPomodoros);
   const [totalMin, setTotalMin] = useState(totalMinutes);
+  const [completionPending, setCompletionPending] = useState(false);
+  const [completionStopIntent, setCompletionStopIntent] =
+    useState<CompletionStopIntent | null>(null);
 
   const endAtRef = useRef<number>(bootstrap.endAt);
   const plannedRef = useRef<number>(bootstrap.plannedSeconds);
+  const taskIdRef = useRef<string | null>(bootstrap.taskId);
+  const cycleTaskIdRef = useRef<string | null>(bootstrap.cycleTaskId);
+  const accumulatedActiveSecondsRef = useRef<number>(bootstrap.accumulatedActiveSeconds);
+  const segmentStartedAtRef = useRef<number | null>(bootstrap.segmentStartedAt);
+  const sessionStartedAtRef = useRef<number | null>(bootstrap.sessionStartedAt);
   const finishedRef = useRef(false);
+  const completionInFlightRef = useRef(false);
+  const completionStopSignalRef = useRef(createCompletionStopSignal());
+  const completedTodayRef = useRef(todayCount);
+  const completedTodayDateRef = useRef(today);
 
   const completionRef = useRef<() => Promise<void>>(async () => {});
 
-  function start() {
+  function startPhase(
+    nextMode: Mode,
+    assignedTaskId: string | null,
+    cycleTaskId: string | null,
+    requestNotificationPermission: boolean,
+    nextStatus: string | null = null,
+  ) {
     const now = Date.now();
-    const seconds = plannedRef.current;
+    const seconds = plannedFor(nextMode);
     const endAt = now + seconds * 1000;
 
+    setMode(nextMode);
+    setPlannedSeconds(seconds);
+    plannedRef.current = seconds;
     endAtRef.current = endAt;
+    taskIdRef.current = nextMode === "WORK" ? assignedTaskId : null;
+    setTaskId(nextMode === "WORK" ? assignedTaskId : null);
+    cycleTaskIdRef.current = cycleTaskId;
+    accumulatedActiveSecondsRef.current = 0;
+    segmentStartedAtRef.current = now;
+    sessionStartedAtRef.current = now;
     finishedRef.current = false;
     setRunning(true);
     setPaused(false);
-    setStatus(null);
+    setStatus(nextStatus);
     setRemaining(seconds);
 
     writeStorage({
-      mode,
+      mode: nextMode,
       endAt,
       remainingSeconds: seconds,
       plannedSeconds: seconds,
+      taskId: nextMode === "WORK" ? assignedTaskId : null,
+      cycleTaskId,
+      accumulatedActiveSeconds: 0,
+      segmentStartedAt: now,
+      sessionStartedAt: now,
+      savedAt: now,
     });
 
     if (
+      requestNotificationPermission &&
       prefs.notificationsEnabled &&
       typeof window !== "undefined" &&
       "Notification" in window &&
       Notification.permission === "default"
     ) {
-      void Notification.requestPermission();
+      void Notification.requestPermission().catch(() => undefined);
     }
   }
 
-  function pause() {
-    const secondsLeft = endAtRef.current
-      ? Math.max(1, Math.ceil((endAtRef.current - Date.now()) / 1000))
-      : remaining;
+  function start() {
+    const assignedTaskId = mode === "WORK" ? taskIdRef.current : null;
+    startPhase(mode, assignedTaskId, assignedTaskId, true);
+  }
 
+  function pause() {
+    if (completionInFlightRef.current) {
+      if (completionStopSignalRef.current.getIntent() === null) {
+        completionStopSignalRef.current.requestStop("pause");
+        setCompletionStopIntent("pause");
+        setRunning(false);
+        setStatus("Guardando la fase completada; auto-avance detenido por pausa.");
+      }
+      return;
+    }
+
+    const now = Date.now();
+    const secondsLeft = endAtRef.current
+      ? Math.max(1, Math.ceil((endAtRef.current - now) / 1000))
+      : remaining;
+    const activeSeconds = calculateActiveSeconds(
+      accumulatedActiveSecondsRef.current,
+      segmentStartedAtRef.current,
+      now,
+    );
+
+    accumulatedActiveSecondsRef.current = activeSeconds;
+    segmentStartedAtRef.current = null;
     setRunning(false);
     setPaused(true);
     setRemaining(secondsLeft);
@@ -219,14 +312,27 @@ export function PomodoroClient({
       endAt: 0,
       remainingSeconds: secondsLeft,
       plannedSeconds: plannedRef.current,
+      taskId: taskIdRef.current,
+      cycleTaskId: cycleTaskIdRef.current,
+      accumulatedActiveSeconds: activeSeconds,
+      segmentStartedAt: null,
+      sessionStartedAt: sessionStartedAtRef.current,
+      savedAt: now,
     });
   }
 
   function resume() {
     const now = Date.now();
     const endAt = now + remaining * 1000;
+    // Estados guardados antes de persistir el inicio original no contienen
+    // información suficiente; al reanudarlos se fija el primer instante
+    // conocido, sin reconstruirlo desde la duración planificada.
+    if (sessionStartedAtRef.current === null) {
+      sessionStartedAtRef.current = now;
+    }
 
     endAtRef.current = endAt;
+    segmentStartedAtRef.current = now;
     finishedRef.current = false;
     setRunning(true);
     setPaused(false);
@@ -237,11 +343,17 @@ export function PomodoroClient({
       endAt,
       remainingSeconds: remaining,
       plannedSeconds: plannedRef.current,
+      taskId: taskIdRef.current,
+      cycleTaskId: cycleTaskIdRef.current,
+      accumulatedActiveSeconds: accumulatedActiveSecondsRef.current,
+      segmentStartedAt: now,
+      sessionStartedAt: sessionStartedAtRef.current,
+      savedAt: now,
     });
   }
 
   function selectMode(nextMode: Mode) {
-    if (running) {
+    if (running || paused || completionInFlightRef.current) {
       return;
     }
 
@@ -250,13 +362,43 @@ export function PomodoroClient({
     setPlannedSeconds(seconds);
     plannedRef.current = seconds;
     setRemaining(seconds);
+    if (nextMode !== "WORK") {
+      taskIdRef.current = null;
+      setTaskId(null);
+    }
+    cycleTaskIdRef.current = null;
+  }
+
+  function selectTask(nextTaskId: string | null) {
+    if (running || paused || completionInFlightRef.current || mode !== "WORK") {
+      return;
+    }
+
+    taskIdRef.current = nextTaskId;
+    setTaskId(nextTaskId);
   }
 
   function cancel() {
+    if (completionInFlightRef.current) {
+      if (completionStopSignalRef.current.getIntent() === null) {
+        completionStopSignalRef.current.requestStop("cancel");
+        setCompletionStopIntent("cancel");
+        setRunning(false);
+        setStatus("Guardando la fase completada; abandono solicitado.");
+      }
+      return;
+    }
+
     finishedRef.current = true;
     endAtRef.current = 0;
+    taskIdRef.current = null;
+    cycleTaskIdRef.current = null;
+    accumulatedActiveSecondsRef.current = 0;
+    segmentStartedAtRef.current = null;
+    sessionStartedAtRef.current = null;
     setRunning(false);
     setPaused(false);
+    setTaskId(null);
     setStatus("Sesión anulada (no se registra)");
     clearStorage();
 
@@ -276,58 +418,206 @@ export function PomodoroClient({
     }
 
     if (Notification.permission === "granted") {
-      new Notification(title, { body });
+      try {
+        new Notification(title, { body });
+      } catch {
+        // La notificación del navegador es best-effort.
+      }
     }
   }
 
   async function handleFinished() {
+    if (completionInFlightRef.current) {
+      return;
+    }
+    completionInFlightRef.current = true;
+    completionStopSignalRef.current.reset();
+    setCompletionPending(true);
+    setCompletionStopIntent(null);
+
     const phase = mode;
     const seconds = plannedRef.current;
-    const endedAt = new Date().toISOString();
+    const actualSeconds = Math.max(
+      1,
+      Math.min(
+        seconds,
+        calculateActiveSeconds(
+          accumulatedActiveSecondsRef.current,
+          segmentStartedAtRef.current,
+          Date.now(),
+        ),
+      ),
+    );
+    const endedAtDate = new Date();
+    const endedAt = endedAtDate.toISOString();
+    const currentDay = toDateKey(endedAtDate, timeZone);
+    const sessionStartedAt =
+      sessionStartedAtRef.current ?? segmentStartedAtRef.current ?? endedAtDate.getTime();
+    const cycleTaskId = cycleTaskIdRef.current;
+    const workStartedDay = phase === "WORK"
+      ? toDateKey(new Date(sessionStartedAt), timeZone)
+      : null;
+    const completedWorkSessionsForNextPhase = getCompletedWorkSessionsTodayAfterCompletion({
+      phase,
+      completedWorkSessionsToday: completedTodayRef.current,
+      countedDay: completedTodayDateRef.current,
+      // El intervalo se determina por el día local en que empezó este WORK,
+      // aunque su pausa/reanudación haya cruzado la medianoche.
+      today: workStartedDay ?? currentDay,
+      workStartedDay,
+    });
+    const completedWorkSessionsToday = getCompletedWorkSessionsTodayAfterCompletion({
+      phase,
+      completedWorkSessionsToday: completedTodayRef.current,
+      countedDay: completedTodayDateRef.current,
+      today: currentDay,
+      workStartedDay,
+    });
+    const countWithoutThisPhase = getCompletedWorkSessionsTodayAfterCompletion({
+      phase: "SHORT_BREAK",
+      completedWorkSessionsToday: completedTodayRef.current,
+      countedDay: completedTodayDateRef.current,
+      today: currentDay,
+      workStartedDay: null,
+    });
+    const outcome = await finishPomodoroPhase({
+      phase,
+      autoAdvance: prefs.autoAdvance,
+      completedWorkSessionsToday: completedWorkSessionsForNextPhase,
+      longBreakInterval: prefs.longBreakInterval,
+      cycleTaskId,
+      notify: () =>
+        notify(
+          `${MODE_LABEL[phase]} completado`,
+          phase === "WORK" ? "Toca descanso, lo has ganado." : "Es hora de volver al foco.",
+        ),
+      register: async (assignedTaskId) => {
+        const formData = new FormData();
+        formData.set("phase", phase);
+        formData.set("plannedSeconds", String(seconds));
+        formData.set("actualSeconds", String(actualSeconds));
+        formData.set("startedAt", new Date(sessionStartedAt).toISOString());
+        formData.set("endedAt", endedAt);
+        if (assignedTaskId) {
+          formData.set("taskId", assignedTaskId);
+        }
 
-    const formData = new FormData();
-    formData.set("phase", phase);
-    formData.set("plannedSeconds", String(seconds));
-    formData.set("endedAt", endedAt);
+        try {
+          return await completePomodoroAction(formData);
+        } catch {
+          return { ok: false, error: "No se pudo guardar la sesión." };
+        }
+      },
+      canContinue: completionStopSignalRef.current.canContinue,
+    });
 
-    const result = await completePomodoroAction(formData);
-
-    const nextToday = completedToday + 1;
-    setCompletedToday(nextToday);
-    setTotalDone(totalDone + 1);
-    setTotalMin(totalMin + seconds / 60);
-    endAtRef.current = 0;
-    setRunning(false);
-    setPaused(false);
-    clearStorage();
-
+    const { result } = outcome;
+    const stopIntent = completionStopSignalRef.current.getIntent();
+    completedTodayDateRef.current = currentDay;
+    completedTodayRef.current = result.ok
+      ? completedWorkSessionsToday
+      : countWithoutThisPhase;
+    setCompletedToday(completedTodayRef.current);
     if (result.ok) {
-      setStatus(
-        phase === "WORK"
-          ? "Concentración completada. ¡Buen trabajo!"
-          : `${MODE_LABEL[phase]} completado.`,
+      if (phase === "WORK") {
+        setTotalMin(totalMin + actualSeconds / 60);
+      }
+      setTotalDone(totalDone + 1);
+    }
+
+    endAtRef.current = 0;
+    accumulatedActiveSecondsRef.current = 0;
+    segmentStartedAtRef.current = null;
+    sessionStartedAtRef.current = null;
+
+    if (result.ok && outcome.nextMode) {
+      const nextMode = outcome.nextMode;
+      const nextTaskId = outcome.nextTaskId;
+      const nextStatus = `${MODE_LABEL[nextMode]} iniciado automáticamente.`;
+      startPhase(
+        nextMode,
+        nextTaskId,
+        cycleTaskId,
+        false,
+        nextStatus,
       );
     } else {
-      setStatus(result.error ?? "No se pudo guardar la sesión.");
+      taskIdRef.current = null;
+      cycleTaskIdRef.current = null;
+      setTaskId(null);
+      setRunning(false);
+      setPaused(false);
+      clearStorage();
+
+      if (result.ok) {
+        setStatus(
+          stopIntent === "cancel"
+            ? "Fase completada registrada; ciclo abandonado."
+            : stopIntent === "pause"
+              ? "Fase completada registrada; auto-avance detenido por pausa."
+              : `${MODE_LABEL[phase]} completado.`,
+        );
+        if (!prefs.autoAdvance && phase === "WORK") {
+          const nextMode = getNextPomodoroPhase("WORK", {
+            autoAdvance: true,
+            completedWorkSessionsToday: completedWorkSessionsForNextPhase,
+            longBreakInterval: prefs.longBreakInterval,
+          });
+          if (nextMode) {
+            setMode(nextMode);
+            const secondsForNext = plannedFor(nextMode);
+            setPlannedSeconds(secondsForNext);
+            plannedRef.current = secondsForNext;
+            setRemaining(secondsForNext);
+          }
+        }
+      } else {
+        const message = result.error ?? "No se pudo guardar la sesión.";
+        setStatus(stopIntent ? `${message} Auto-avance detenido.` : message);
+      }
     }
 
-    if (phase === "WORK") {
-      notify("Pomodoro completado", "Toca descanso, lo has ganado.");
-
-      const nextMode: Mode =
-        nextToday % prefs.longBreakInterval === 0 ? "LONG_BREAK" : "SHORT_BREAK";
-      const secondsForNext = plannedFor(nextMode);
-
-      setMode(nextMode);
-      setPlannedSeconds(secondsForNext);
-      plannedRef.current = secondsForNext;
-      setRemaining(secondsForNext);
-    }
+    completionStopSignalRef.current.reset();
+    setCompletionStopIntent(null);
+    setCompletionPending(false);
+    completionInFlightRef.current = false;
   }
 
   useEffect(() => {
     completionRef.current = handleFinished;
   });
+
+  useEffect(() => {
+    if ((!bootstrap.running && !bootstrap.paused) || bootstrap.savedAt > 0) {
+      return;
+    }
+
+    const savedAt = Date.now();
+    const remainingSeconds = bootstrap.running
+      ? Math.max(1, Math.ceil((bootstrap.endAt - savedAt) / 1000))
+      : bootstrap.remaining;
+
+    // Persiste la migración al primer montaje para que futuras recargas no
+    // vuelvan a perder tiempo activo transcurrido desde esta recuperación.
+    writeStorage({
+      mode: bootstrap.mode,
+      endAt: bootstrap.running ? bootstrap.endAt : 0,
+      remainingSeconds,
+      plannedSeconds: bootstrap.plannedSeconds,
+      taskId: bootstrap.taskId,
+      cycleTaskId: bootstrap.cycleTaskId,
+      accumulatedActiveSeconds: bootstrap.accumulatedActiveSeconds,
+      segmentStartedAt: bootstrap.running ? bootstrap.segmentStartedAt : null,
+      sessionStartedAt: bootstrap.sessionStartedAt,
+      savedAt,
+    });
+  }, [bootstrap]);
+
+  useEffect(() => {
+    if (!running && !paused && readStorage()) {
+      clearStorage();
+    }
+  }, [running, paused]);
 
   useEffect(() => {
     if (!running || !endAtRef.current) {
@@ -386,7 +676,7 @@ export function PomodoroClient({
               key={item}
               type="button"
               onClick={() => selectMode(item)}
-              disabled={running}
+              disabled={running || paused}
               className={cn(
                 "rounded-full px-3 py-1 text-xs font-medium transition-colors",
                 mode === item
@@ -398,6 +688,28 @@ export function PomodoroClient({
             </button>
           ))}
         </div>
+
+        {mode === "WORK" && (
+          <label className="flex w-full max-w-sm flex-col gap-1 text-sm">
+            <span className="font-medium">Tarea (opcional)</span>
+            <select
+              value={taskId ?? ""}
+              onChange={(event) => selectTask(event.target.value || null)}
+              disabled={running || paused}
+              className="h-10 rounded-lg border border-border bg-background px-3 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <option value="">Sin tarea asignada</option>
+              {taskId && !tasks.some((task) => task.id === taskId) && (
+                <option value={taskId}>Tarea asignada (ya no está pendiente)</option>
+              )}
+              {tasks.map((task) => (
+                <option key={task.id} value={task.id}>
+                  {task.title}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
 
         <svg
           width="280"
@@ -438,7 +750,22 @@ export function PomodoroClient({
         </svg>
 
         <div className="flex flex-wrap items-center justify-center gap-3">
-          {running ? (
+          {completionPending ? completionStopIntent ? (
+            <p className="text-center text-sm text-muted-foreground" role="status">
+              {completionStopIntent === "pause"
+                ? "Pausa solicitada; esperando el registro de la fase completada."
+                : "Abandono solicitado; esperando el registro de la fase completada."}
+            </p>
+          ) : (
+            <>
+              <Button variant="secondary" onClick={pause} className="min-w-28">
+                Pausar
+              </Button>
+              <Button variant="ghost" onClick={cancel}>
+                Abandonar
+              </Button>
+            </>
+          ) : running ? (
             <>
               <Button variant="secondary" onClick={pause} className="min-w-28">
                 Pausar

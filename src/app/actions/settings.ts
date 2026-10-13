@@ -70,6 +70,7 @@ export async function updatePomodoroSettingsAction(
     longBreakInterval: formData.get("longBreakInterval"),
     dailyPomodoroGoal: formData.get("dailyPomodoroGoal"),
     notificationsEnabled: formData.get("notificationsEnabled") === "on",
+    autoAdvance: formData.get("autoAdvance") === "on",
   });
 
   if (!parsed.success) {
@@ -83,6 +84,7 @@ export async function updatePomodoroSettingsAction(
     longBreakInterval: parsed.data.longBreakInterval,
     dailyPomodoroGoal: parsed.data.dailyPomodoroGoal,
     notificationsEnabled: parsed.data.notificationsEnabled,
+    autoAdvance: parsed.data.autoAdvance,
   };
 
   await prisma.userPreferences.upsert({

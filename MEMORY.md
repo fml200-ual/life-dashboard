@@ -53,9 +53,19 @@ si se toca lógica).
 
 - **Neon**: proyecto `hidden-mode-50556987`, branch `production`
   (`br-dark-snow-ba2hi3vl`), database `neondb`. Tablas migradas + seed aplicado.
-- **Vercel**: https://life-dashboard-orcin-theta.vercel.app — desplegado desde el
-  dashboard, con `DATABASE_URL` definida en **Production**. `/api/health` responde
-  `{"status":"ok"}` (valida conexión a la base).
+- **Vercel**: https://life-dashboard-orcin-theta.vercel.app — proyecto
+  `prj_EvrL6dMpeyXFiusGwwUgDHY7de3h`, equipo `team_Ixa2i5q42hIQGIiCNyIxkRKW`
+  ("Javi's projects"). `DATABASE_URL` (pooled, la misma de `.env`) definida en
+  **Production** y **Preview**; apunta a la Neon `production`. `/api/health`
+  responde `{"status":"ok"}` pero **solo ejecuta `SELECT 1`**, así que no
+  detecta un esquema vacío: valida conexión, no tablas.
+- **Integración Neon/Vercel (ojo)**: las variables `POSTGRES_URL` y
+  `PRISMA_DATABASE_URL` las inyecta la integración y siguen apuntando a una base
+  vacía; ninguna se usa en runtime (la app solo lee `DATABASE_URL`).
+- **Re-deploy por CLI**: `vercel redeploy` falla con `git_info_fail` ("Git
+  information retrieval failed"); el proyecto está conectado a GitHub
+  (`fml200-ual/life-dashboard`). Para redesplegar sin Git: desplegar desde una
+  copia limpia del código commiteado (`git archive HEAD`) con `vercel --prod`.
 
 ## Arquitectura (resumen)
 
@@ -66,16 +76,41 @@ si se toca lógica).
   `src/generated/prisma` (gitignored) y se regenera en `postinstall`.
 - Fechas "de día" como cadenas locales `YYYY-MM-DD` (`src/lib/date.ts`);
   `dueDate` se guarda a medianoche UTC. Ver skill `local-dates`.
-- Pomodoro basado en timestamps (`endAt`), reanudable dentro de 24 h.
+- Pomodoro basado en timestamps (`endAt`), reanudable dentro de 24 h; la spec
+  [`002-pomodoro-autostart-task-time`](specs/002-pomodoro-autostart-task-time/spec.md)
+  añade auto-avance desactivado por defecto, pausa/reanudación, notificaciones
+  best-effort y asignación opcional de tareas a focos WORK. Se persisten los
+  segundos activos por sesión y el acumulado por tarea, sin contar pausas ni
+  completar tareas automáticamente. El selector queda bloqueado mientras la
+  sesión está activa o pausada; los focos WORK automáticos conservan la tarea.
+- La migración aditiva `20261013120000_pomodoro_autostart_task_time` está aplicada
+  y validada según T002 de la spec; añade `UserPreferences.autoAdvance` (false),
+  `PomodoroSession.actualSeconds` (0) y `Task.accumulatedSeconds` (0). La lista
+  de tareas y el dashboard muestran el acumulado con formato compartido.
 - `cacheComponents` desactivado (Next 16) para no cachear datos personales.
 
 ## Estado
 
 - **Hecho**: sprints 0-3 (auth, shell + tema, tareas, pomodoro, notas, ajustes,
   dashboard, health); migración + seed; despliegue en Vercel; health OK.
-- **Bloqueante en curso**: `POST /login` devuelve **500** con
-  `TypeError: Failed to parse body as FormData.` (React #441). Sospecha de
-  regresión de Next 16.4.0 + Turbopack en Server Actions/FormData. La app no es
-  usable hasta resolverlo.
-- **Pendiente**: tests (Vitest), limpieza de sesiones vencidas, integración
-  Gmail/OAuth, etiquetas (`Tag`).
+- **Resuelto (login 500 en Vercel)**: el `POST /login` devolvía **500** con
+  `prisma.user.findUnique()` lanzando **Prisma P2021** (`The table
+  public."User" does not exist`). La causa **no** era Next/FormData (el
+  `TypeError: Failed to parse body as FormData` / React #441 era un síntoma
+  enmascarado en el cliente), sino que Vercel usaba un `DATABASE_URL`
+  (inyectado por la integración Neon/Vercel) apuntando a una base **vacía**.
+  Arreglo: redefinir `DATABASE_URL` en Vercel con la URL pooled de `.env` y
+  redesplegar. Verificado: login redirige a `/dashboard` con el usuario seed.
+- **Estado de spec**: T001–T009 de `002-pomodoro-autostart-task-time` tienen
+  gates automatizadas verdes; tras dos vueltas de correcciones post-revisión, la
+  suite tiene 100 tests y pasan lint, typecheck, build y diff-check. El parser
+  conserva el tiempo deducible de estados Pomodoro legacy; si falta el instante
+  original, no se reconstruye desde la duración planificada. Pausar/abandonar
+  durante un registro en vuelo detiene el auto-avance, pero no revierte una fase
+  cuyo registro ya fue enviado. Se preserva el inicio real de fases nuevas al
+  cruzar medianoche y el resumen usa segundos activos con fallback planificado
+  solo para sesiones legacy. No se desplegó la aplicación como parte de T009.
+  La revisión visual/manual autenticada del ciclo y `/tasks`/dashboard fue
+  delegada explícitamente al usuario y sigue pendiente de feedback.
+- **Pendiente**: limpieza de sesiones vencidas, integración Gmail/OAuth,
+  etiquetas (`Tag`).

@@ -67,6 +67,7 @@ export const pomodoroSettingsSchema = z.object({
   longBreakInterval: z.coerce.number().int().min(1).max(12),
   dailyPomodoroGoal: z.coerce.number().int().min(1).max(50),
   notificationsEnabled: z.coerce.boolean(),
+  autoAdvance: z.boolean().default(false),
 });
 
 export type LoginInput = z.infer<typeof loginSchema>;

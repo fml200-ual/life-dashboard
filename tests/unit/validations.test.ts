@@ -5,6 +5,7 @@ import {
   loginSchema,
   noteSchema,
   preferencesSchema,
+  pomodoroSettingsSchema,
   taskSchema,
 } from "@/lib/validations";
 
@@ -93,6 +94,30 @@ describe("preferencesSchema", () => {
     expect(preferencesSchema.safeParse({ ...base, workMinutes: "181" }).success).toBe(
       false,
     );
+  });
+});
+
+describe("pomodoroSettingsSchema", () => {
+  const base = {
+    workMinutes: "25",
+    shortBreakMinutes: "5",
+    longBreakMinutes: "15",
+    longBreakInterval: "4",
+    dailyPomodoroGoal: "8",
+    notificationsEnabled: true,
+  };
+
+  it("acepta el auto-avance marcado y desmarcado", () => {
+    expect(pomodoroSettingsSchema.parse({ ...base, autoAdvance: true }).autoAdvance).toBe(
+      true,
+    );
+    expect(pomodoroSettingsSchema.parse({ ...base, autoAdvance: false }).autoAdvance).toBe(
+      false,
+    );
+  });
+
+  it("mantiene apagado el auto-avance cuando no se proporciona", () => {
+    expect(pomodoroSettingsSchema.parse(base).autoAdvance).toBe(false);
   });
 });
 

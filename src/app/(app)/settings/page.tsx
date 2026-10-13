@@ -30,6 +30,7 @@ export default async function SettingsPage() {
         longBreakInterval: preferences?.longBreakInterval ?? 4,
         dailyPomodoroGoal: preferences?.dailyPomodoroGoal ?? 8,
         notificationsEnabled: preferences?.notificationsEnabled ?? true,
+        autoAdvance: preferences?.autoAdvance ?? false,
       }}
       timeZones={listTimeZones()}
     />

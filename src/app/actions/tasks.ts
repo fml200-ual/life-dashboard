@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { getCurrentUser } from "@/lib/auth";
 import { todayKey, utcMidnightFromDateKey } from "@/lib/date";
 import { prisma } from "@/lib/db";
+import type { CreateTaskResult } from "@/lib/task-list";
 import { categorySchema, taskSchema } from "@/lib/validations";
 
 export type ActionResult = {
@@ -24,7 +25,7 @@ function firstError(error: { issues?: Array<{ message: string }> } | unknown): s
   return "Datos no válidos.";
 }
 
-export async function createTaskAction(formData: FormData): Promise<ActionResult> {
+export async function createTaskAction(formData: FormData): Promise<CreateTaskResult> {
   const user = await getCurrentUser();
   if (!user) {
     return { ok: false, error: "No autorizado." };
@@ -66,13 +67,25 @@ export async function createTaskAction(formData: FormData): Promise<ActionResult
       dueDate: data.dueDate ? utcMidnightFromDateKey(data.dueDate) : null,
       categoryId: data.categoryId,
     },
-    select: { id: true },
+    select: {
+      id: true,
+      title: true,
+      description: true,
+      status: true,
+      priority: true,
+      accumulatedSeconds: true,
+      dueDate: true,
+      completedAt: true,
+      categoryId: true,
+      createdAt: true,
+      updatedAt: true,
+    },
   });
 
   revalidatePath("/tasks");
   revalidatePath("/dashboard");
 
-  return { ok: true, id: task.id };
+  return { ok: true, id: task.id, task };
 }
 
 export async function updateTaskAction(formData: FormData): Promise<ActionResult> {

@@ -11,6 +11,8 @@ import {
 } from "@/app/actions/tasks";
 import { Button, EmptyState, Input, Select, Textarea } from "@/components/ui";
 import type { Category, Task } from "@/generated/prisma/client";
+import { applyCreatedTask, type CreateTaskResult, type TaskListItem } from "@/lib/task-list";
+import { formatTaskTime } from "@/lib/task-time";
 import { cn } from "@/lib/utils";
 
 const STATUS_META: Record<Task["status"], { label: string; className: string }> = {
@@ -49,7 +51,7 @@ export function TasksClient({
   categories: Category[];
   today: string;
 }) {
-  const [tasks, setTasks] = useState(initialTasks);
+  const [tasks, setTasks] = useState<TaskListItem[]>(initialTasks);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("ALL");
   const [categoryFilter, setCategoryFilter] = useState<string>("ALL");
   const [search, setSearch] = useState("");
@@ -96,7 +98,7 @@ export function TasksClient({
     });
   }
 
-  function handleToggle(task: Task) {
+  function handleToggle(task: TaskListItem) {
     const formData = new FormData();
     formData.set("id", task.id);
 
@@ -104,13 +106,13 @@ export function TasksClient({
       ...task,
       status: task.status === "DONE" ? "TODO" : "DONE",
       completedAt: task.status === "DONE" ? null : new Date(),
-    } as Task;
+    } as TaskListItem;
 
     setTasks((prev) => prev.map((item) => (item.id === task.id ? next : item)));
     run(toggleTaskAction, formData);
   }
 
-  function handleDelete(task: Task) {
+  function handleDelete(task: TaskListItem) {
     setTasks((prev) => prev.filter((item) => item.id !== task.id));
     if (editingId === task.id) {
       setEditingId(null);
@@ -122,6 +124,20 @@ export function TasksClient({
     const formData = new FormData();
     formData.set("id", id);
     return formData;
+  }
+
+  async function handleCreateTask(formData: FormData): Promise<CreateTaskResult> {
+    setError(null);
+    const result = await createTaskAction(formData);
+    if (!result.ok) {
+      setError(result.error ?? "Error al guardar.");
+      return result;
+    }
+
+    startTransition(() => {
+      setTasks((prev) => applyCreatedTask(prev, result));
+    });
+    return result;
   }
 
   const pendingCount = tasks.filter((task) => task.status !== "DONE").length;
@@ -136,7 +152,7 @@ export function TasksClient({
             {pendingCount} por hacer · {doneCount} completadas
           </p>
         </div>
-        <NewTaskForm categories={categories} onCreate={(formData) => run(createTaskAction, formData)} />
+        <NewTaskForm categories={categories} onCreate={handleCreateTask} />
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -220,6 +236,7 @@ export function TasksClient({
       )}
     </div>
   );
+
 }
 
 function NewTaskForm({
@@ -227,7 +244,7 @@ function NewTaskForm({
   onCreate,
 }: {
   categories: Category[];
-  onCreate: (formData: FormData) => void;
+  onCreate: (formData: FormData) => Promise<CreateTaskResult>;
 }) {
   const [newCategory, setNewCategory] = useState("");
 
@@ -245,7 +262,11 @@ function NewTaskForm({
           formData.set("categoryId", category.id);
         }
       }
-      onCreate(formData);
+      const result = await onCreate(formData);
+      if (!result.ok) {
+        return;
+      }
+
       form.reset();
       setNewCategory("");
     });
@@ -312,7 +333,7 @@ function TaskRow({
   onEdit,
   onSave,
 }: {
-  task: Task;
+  task: TaskListItem;
   categories: Category[];
   today: string;
   editing: boolean;
@@ -400,6 +421,9 @@ function TaskRow({
                   Para {formatDue(dueDate)}
                 </span>
               ) : null}
+              <span className="text-xs text-muted-foreground">
+                Tiempo invertido: {formatTaskTime(task.accumulatedSeconds)}
+              </span>
             </div>
           </div>
 
@@ -432,7 +456,7 @@ function EditTaskForm({
   onSave,
   onCancel,
 }: {
-  task: Task;
+  task: TaskListItem;
   categories: Category[];
   onSave: (formData: FormData) => void;
   onCancel: () => void;
