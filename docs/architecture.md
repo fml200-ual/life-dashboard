@@ -53,15 +53,37 @@ propia y opaca.
 
 ## Pomodoro (basado en timestamps)
 
-- El temporizador no guarda segundos en el cliente: al iniciar se fija `endAt`
-  (epoch ms) y se persiste en `localStorage` junto a fase y duración.
-- Puede cerrarse la pestaña y retomarse antes de 24 h (se reanuda con el tiempo
-  restante real); si al volver ya expiró o pasaron más de 24 h, la sesión se
-  descarta y no se registra.
-- Al completar una sesión, el cliente envía `plannedSeconds` y `endedAt` a una
-  Server Action que crea el registro (el backend recalcula `startedAt`).
-- Las estadísticas (hoy / total) se calculan desde `PomodoroSession`.
-- Recordatorio de descanso largo cada `longBreakInterval` sesiones completadas.
+- El temporizador persiste en `localStorage` la fase, `endAt`, inicio original,
+  UUID estable, tarea del ciclo y segmentos activos cerrados (pares de epoch-ms).
+  Al completar o abandonar, envía ID, timestamps, tarea opcional, estado y
+  segmentos a la Server Action; los segmentos son transitorios y no se guardan
+  en PostgreSQL. Se puede cerrar la pestaña y reanudar antes de 24 h; las fases
+  expiradas al volver se descartan. El recordatorio de descanso largo sigue el
+  intervalo `longBreakInterval` de sesiones completadas.
+- La acción valida el orden, rango y no-solapamiento de segmentos y la coherencia
+  aritmética; deriva `actualSeconds` sumando milisegundos y truncando el total
+  una sola vez. El reloj y los timestamps los aporta el navegador: se valida su
+  consistencia, no su autenticidad. Las fases completadas y abandonadas se
+  guardan con su ID estable; abandonar persiste `completed = false` y `endedAt`
+  del abandono, incluso si la fase estaba pausada. En carreras con el mismo ID,
+  gana la primera transacción confirmada; un retry solo es idempotente si
+  coinciden los valores persistidos `phase`, `taskId`, `actualSeconds`,
+  `startedAt`, `endedAt` y `completed`; en otro caso se devuelve conflicto.
+- El acumulado de tarea usa tiempo de pared desde inicio hasta fin efectivo
+  (pausas incluidas), también para descansos asociados a la tarea del WORK más
+  reciente del ciclo, con máximo de 28 800 segundos por fase. La creación de la
+  fase y el incremento de tarea propia se registran atómicamente. Si la tarea no
+  existe, es ajena o fue eliminada, la fase queda registrada sin tarea ni
+  incremento. La tarea nunca se completa automáticamente. Las fases expiradas
+  mientras la pestaña estaba cerrada se descartan, conservando la regla previa.
+- Las estadísticas de duración activa suman `actualSeconds` de todas las fases
+  guardadas, completadas o abandonadas, con o sin tarea; las pausas quedan
+  excluidas. Los objetivos y conteos solo incluyen WORK completados y los
+  atribuyen al día local de inicio según la zona horaria del usuario. Para filas
+  históricas con `actualSeconds = 0`, el fallback a `plannedSeconds` solo se
+  aplica a WORK completado; descansos y abandonos a cero aportan cero. Los
+  acumulados de tareas anteriores se conservan sin backfill y `/tasks` y
+  `/dashboard` advierten que no incluyen pausas ni descansos.
 
 ## Notas
 

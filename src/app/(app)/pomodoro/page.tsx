@@ -3,10 +3,7 @@ import { PomodoroClient } from "./pomodoro-client";
 import { requireUser } from "@/lib/auth";
 import { todayKey } from "@/lib/date";
 import { prisma } from "@/lib/db";
-import {
-  countCompletedWorkSessionsForDay,
-  getPomodoroSessionSeconds,
-} from "@/lib/pomodoro";
+import { getPomodoroStatistics } from "@/lib/pomodoro";
 
 export default async function PomodoroPage() {
   const user = await requireUser();
@@ -14,7 +11,7 @@ export default async function PomodoroPage() {
   const [preferences, pomodoros, tasks] = await Promise.all([
     prisma.userPreferences.findUnique({ where: { userId: user.id } }),
     prisma.pomodoroSession.findMany({
-      where: { userId: user.id, completed: true },
+      where: { userId: user.id },
       orderBy: { startedAt: "desc" },
       select: {
         phase: true,
@@ -32,16 +29,7 @@ export default async function PomodoroPage() {
   ]);
 
   const today = todayKey(user.timezone);
-  const todayCount = countCompletedWorkSessionsForDay(
-    pomodoros,
-    today,
-    user.timezone,
-  );
-
-  const totalMinutes = pomodoros.reduce(
-    (acc, session) => acc + getPomodoroSessionSeconds(session),
-    0,
-  ) / 60;
+  const statistics = getPomodoroStatistics(pomodoros, today, user.timezone);
 
   return (
     <PomodoroClient
@@ -55,11 +43,11 @@ export default async function PomodoroPage() {
         autoAdvance: preferences?.autoAdvance ?? false,
       }}
       tasks={tasks}
-      todayCount={todayCount}
+      todayCount={statistics.completedWorkSessionsToday}
       today={today}
       timeZone={user.timezone}
-      totalPomodoros={pomodoros.length}
-      totalMinutes={totalMinutes}
+      totalPomodoros={pomodoros.filter((session) => session.completed).length}
+      totalMinutes={statistics.totalActiveSeconds / 60}
     />
   );
 }

@@ -76,13 +76,18 @@ si se toca lógica).
   `src/generated/prisma` (gitignored) y se regenera en `postinstall`.
 - Fechas "de día" como cadenas locales `YYYY-MM-DD` (`src/lib/date.ts`);
   `dueDate` se guarda a medianoche UTC. Ver skill `local-dates`.
-- Pomodoro basado en timestamps (`endAt`), reanudable dentro de 24 h; la spec
+- Pomodoro basado en timestamps (`endAt`), reanudable dentro de 24 h; las specs
   [`002-pomodoro-autostart-task-time`](specs/002-pomodoro-autostart-task-time/spec.md)
-  añade auto-avance desactivado por defecto, pausa/reanudación, notificaciones
-  best-effort y asignación opcional de tareas a focos WORK. Se persisten los
-  segundos activos por sesión y el acumulado por tarea, sin contar pausas ni
-  completar tareas automáticamente. El selector queda bloqueado mientras la
-  sesión está activa o pausada; los focos WORK automáticos conservan la tarea.
+  y [`003-task-total-time`](specs/003-task-total-time/spec.md) definen auto-avance
+  (desactivado por defecto), pausa/reanudación, notificaciones best-effort y
+  tareas opcionales por ciclo.
+  La fase mantiene UUID e intervalos activos en `localStorage`; al completar o
+  abandonar, el servidor valida los segmentos y deriva `actualSeconds` sin
+  persistirlos. El tiempo activo de estadísticas excluye pausas e incluye todas
+  las fases registradas; el acumulado de tarea usa tiempo de pared, incluye
+  pausas y descansos asociados, con tope de 8 h por fase. Los abandonos se
+  guardan como `completed=false`; en conflictos de ID gana la primera
+  transacción. No se completa la tarea automáticamente.
 - La migración aditiva `20261013120000_pomodoro_autostart_task_time` está aplicada
   y validada según T002 de la spec; añade `UserPreferences.autoAdvance` (false),
   `PomodoroSession.actualSeconds` (0) y `Task.accumulatedSeconds` (0). La lista
@@ -112,5 +117,16 @@ si se toca lógica).
   solo para sesiones legacy. No se desplegó la aplicación como parte de T009.
   La revisión visual/manual autenticada del ciclo y `/tasks`/dashboard fue
   delegada explícitamente al usuario y sigue pendiente de feedback.
+- **Spec 003 — tiempo total por tarea**: T001–T006 implementadas y verdes; T007
+  es la convergencia documental. Reutiliza `PomodoroSession.id` y los campos
+  existentes, sin migración. La suite reportada tras T006 tiene 130 tests en 9
+  archivos; lint y typecheck verdes. La revisión visual/manual de escritorio y
+  móvil no se pudo ejecutar porque Chrome DevTools no encontró el ejecutable
+  configurado. Los acumulados históricos se conservan sin recalcular; se muestra
+  el aviso de que no incluyen pausas ni descansos. Fallback estadístico legacy:
+  solo WORK completado con `actualSeconds = 0` usa `plannedSeconds`; descansos y
+  abandonos a cero aportan cero. Convergencia final: test (130 en 9 archivos),
+  lint, typecheck, build y `git diff --check` verdes. No se desplegó ni se tocó
+  la base de datos.
 - **Pendiente**: limpieza de sesiones vencidas, integración Gmail/OAuth,
   etiquetas (`Tag`).

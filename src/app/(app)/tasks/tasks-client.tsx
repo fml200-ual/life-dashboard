@@ -155,6 +155,14 @@ export function TasksClient({
         <NewTaskForm categories={categories} onCreate={handleCreateTask} />
       </div>
 
+      <p
+        role="note"
+        className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
+      >
+        Los acumulados anteriores a esta mejora solo reflejan el tiempo activo de
+        WORK; no incluyen pausas ni descansos. Se conservan tal cual.
+      </p>
+
       <div className="flex flex-wrap items-center gap-3">
         <div>
           <label htmlFor="search" className="sr-only">

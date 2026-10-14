@@ -5,6 +5,7 @@ import { computeStreak, addDaysToKey, todayKey, toDateKey } from "@/lib/date";
 import { prisma } from "@/lib/db";
 import { formatTaskTime } from "@/lib/task-time";
 import { requireUser } from "@/lib/auth";
+import { getPomodoroStatistics } from "@/lib/pomodoro";
 
 const STATUS_LABEL: Record<string, string> = {
   TODO: "Pendiente",
@@ -59,8 +60,14 @@ export default async function DashboardPage() {
     }),
     prisma.userPreferences.findUnique({ where: { userId: user.id } }),
     prisma.pomodoroSession.findMany({
-      where: { userId: user.id, completed: true },
-      select: { phase: true, plannedSeconds: true, startedAt: true },
+      where: { userId: user.id },
+      select: {
+        phase: true,
+        completed: true,
+        actualSeconds: true,
+        plannedSeconds: true,
+        startedAt: true,
+      },
     }),
   ]);
 
@@ -74,16 +81,9 @@ export default async function DashboardPage() {
       toDateKey(task.dueDate, timeZone) < today,
   );
 
-  const todayPomodoros = pomodoros.filter(
-    (session) => toDateKey(session.startedAt, timeZone) === today,
-  ).length;
-  const todayFocusMinutes = pomodoros
-    .filter(
-      (session) =>
-        session.phase === "WORK" &&
-        toDateKey(session.startedAt, timeZone) === today,
-    )
-    .reduce((acc, session) => acc + session.plannedSeconds / 60, 0);
+  const pomodoroStatistics = getPomodoroStatistics(pomodoros, today, timeZone);
+  const todayPomodoros = pomodoroStatistics.completedWorkSessionsToday;
+  const todayFocusMinutes = pomodoroStatistics.todayActiveWorkSeconds / 60;
 
   const dailyGoal = prefs?.dailyPomodoroGoal ?? 8;
   const pomodoroGoalPct = Math.min(100, Math.round((todayPomodoros / dailyGoal) * 100));
@@ -133,6 +133,14 @@ export default async function DashboardPage() {
             : `Tienes ${pendingTasks.length} tareas pendientes.`}
         </p>
       </header>
+
+      <p
+        role="note"
+        className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
+      >
+        Los acumulados anteriores a esta mejora solo reflejan el tiempo activo de
+        WORK; no incluyen pausas ni descansos. Se conservan tal cual.
+      </p>
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard

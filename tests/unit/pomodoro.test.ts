@@ -4,10 +4,14 @@ import { toDateKey } from "@/lib/date";
 import {
   calculateActiveSeconds,
   canResumePomodoro,
+  calculateActualSeconds,
   countCompletedWorkSessionsForDay,
+  calculateTaskWallSeconds,
   getNextPomodoroPhase,
   getCompletedWorkSessionsTodayAfterCompletion,
   getPomodoroSessionSeconds,
+  getPomodoroStatistics,
+  isValidActiveSegments,
   parsePomodoroState,
   recoverPomodoroState,
   serializePomodoroState,
@@ -191,6 +195,30 @@ describe("calculateActiveSeconds", () => {
   });
 });
 
+describe("métricas de segmentos Pomodoro", () => {
+  it("valida segmentos ordenados, no solapados y dentro del intervalo de fase", () => {
+    expect(isValidActiveSegments(1_000, 10_000, [[1_000, 2_500], [4_000, 5_000]])).toBe(true);
+    expect(isValidActiveSegments(1_000, 10_000, [])).toBe(true);
+    expect(isValidActiveSegments(1_000, 10_000, [[4_000, 5_000], [2_000, 3_000]])).toBe(false);
+    expect(isValidActiveSegments(1_000, 10_000, [[1_000, 5_000], [4_999, 6_000]])).toBe(false);
+    expect(isValidActiveSegments(1_000, 10_000, [[900, 2_000]])).toBe(false);
+    expect(isValidActiveSegments(1_000, 10_000, [[9_000, 10_001]])).toBe(false);
+    expect(isValidActiveSegments(1_000, 10_000, [[2_000, 2_000]])).toBe(false);
+    expect(isValidActiveSegments(10_000, 1_000, [])).toBe(false);
+  });
+
+  it("suma milisegundos y trunca una sola vez al obtener segundos activos", () => {
+    expect(calculateActualSeconds([[0, 600], [1_000, 1_600], [2_000, 2_900]])).toBe(2);
+    expect(calculateActualSeconds([])).toBe(0);
+  });
+
+  it("calcula segundos de pared incluyendo pausas y limita cada fase a ocho horas", () => {
+    expect(calculateTaskWallSeconds(1_000, 4_500)).toBe(3);
+    expect(calculateTaskWallSeconds(0, 28_800_999_000)).toBe(28_800);
+    expect(calculateTaskWallSeconds(5_000, 4_000)).toBe(0);
+  });
+});
+
 describe("canResumePomodoro", () => {
   const dayMs = 24 * 60 * 60 * 1000;
 
@@ -213,6 +241,8 @@ describe("persistencia recuperable del temporizador", () => {
     plannedSeconds: 120,
     taskId: "task-1",
     cycleTaskId: "task-1",
+    sessionId: "123e4567-e89b-42d3-a456-426614174000",
+    activeSegments: [[80_000, 105_000]] as const,
       accumulatedActiveSeconds: 25,
       segmentStartedAt: 105_000,
       sessionStartedAt: 80_000,
@@ -226,6 +256,73 @@ describe("persistencia recuperable del temporizador", () => {
     expect(recoverPomodoroState(restored, 115_000)).toEqual({
       ...runningState,
       activeSeconds: 35,
+    });
+  });
+
+  it("conserva el registro terminal exacto para recuperarlo tras una respuesta incierta", () => {
+    const pendingState = {
+      ...runningState,
+      endAt: 0,
+      remainingSeconds: 1,
+      segmentStartedAt: null,
+      savedAt: 110_000,
+      pendingRegistration: {
+        sessionId: runningState.sessionId,
+        phase: "WORK" as const,
+        plannedSeconds: 120,
+        startedAt: 80_000,
+        endedAt: 110_000,
+        activeSegments: [[80_000, 105_000]] as const,
+        completed: true,
+        taskId: "task-1",
+      },
+    };
+
+    expect(parsePomodoroState(serializePomodoroState(pendingState))).toEqual(pendingState);
+  });
+
+  it("conserva UUID, inicio original y segmentos cerrados tras pausa y recuperación", () => {
+    const pausedState = {
+      ...runningState,
+      endAt: 0,
+      remainingSeconds: 90,
+      accumulatedActiveSeconds: 25,
+      segmentStartedAt: null,
+      savedAt: 120_000,
+      activeSegments: [[80_000, 105_000]] as const,
+    };
+    const restored = parsePomodoroState(serializePomodoroState(pausedState));
+
+    expect(restored).toMatchObject({
+      sessionId: runningState.sessionId,
+      sessionStartedAt: 80_000,
+      activeSegments: [[80_000, 105_000]],
+      taskId: "task-1",
+      cycleTaskId: "task-1",
+      segmentStartedAt: null,
+    });
+    expect(recoverPomodoroState(restored, 130_000)).toMatchObject({
+      sessionId: runningState.sessionId,
+      sessionStartedAt: 80_000,
+      activeSegments: [[80_000, 105_000]],
+      activeSeconds: 25,
+    });
+  });
+
+  it("conserva la asignación del ciclo e intervalos previos al reanudar", () => {
+    const resumed = {
+      ...runningState,
+      segmentStartedAt: 120_000,
+      savedAt: 120_000,
+      activeSegments: [[80_000, 105_000]] as const,
+    };
+
+    expect(parsePomodoroState(serializePomodoroState(resumed))).toMatchObject({
+      sessionId: runningState.sessionId,
+      sessionStartedAt: 80_000,
+      activeSegments: [[80_000, 105_000]],
+      taskId: "task-1",
+      cycleTaskId: "task-1",
     });
   });
 
@@ -257,6 +354,7 @@ describe("persistencia recuperable del temporizador", () => {
       plannedSeconds: 25 * 60,
       segmentStartedAt: startedAt.getTime(),
       sessionStartedAt: startedAt.getTime(),
+      activeSegments: [],
       savedAt: startedAt.getTime(),
     };
     const pausedState = {
@@ -265,6 +363,7 @@ describe("persistencia recuperable del temporizador", () => {
       remainingSeconds: 24 * 60,
       accumulatedActiveSeconds: 60,
       segmentStartedAt: null,
+      activeSegments: [[startedAt.getTime(), pausedAt.getTime()]] as const,
       savedAt: pausedAt.getTime(),
     };
     const loadedPausedState = parsePomodoroState(serializePomodoroState(pausedState));
@@ -333,10 +432,41 @@ describe("persistencia recuperable del temporizador", () => {
     expect(parsePomodoroState(legacy)).toMatchObject({
       mode: "WORK",
       taskId: null,
+      sessionId: null,
+      activeSegments: [],
       accumulatedActiveSeconds: 30,
       segmentStartedAt: null,
       sessionStartedAt: null,
     });
+  });
+
+  it("rechaza segmentos persistidos mal formados, fuera de rango, solapados o posteriores al tramo abierto", () => {
+    const validState = {
+      ...runningState,
+      savedAt: 120_000,
+      segmentStartedAt: 110_000,
+    };
+
+    expect(parsePomodoroState(JSON.stringify({
+      ...validState,
+      activeSegments: [[80_000, 105_000], [104_000, 108_000]],
+    }))).toBeNull();
+    expect(parsePomodoroState(JSON.stringify({
+      ...validState,
+      activeSegments: [[79_999, 105_000]],
+    }))).toBeNull();
+    expect(parsePomodoroState(JSON.stringify({
+      ...validState,
+      activeSegments: [[80_000, 111_000]],
+    }))).toBeNull();
+    expect(parsePomodoroState(JSON.stringify({
+      ...validState,
+      activeSegments: [[80_000, "105000"]],
+    }))).toBeNull();
+    expect(parsePomodoroState(JSON.stringify({
+      ...validState,
+      sessionId: "not-a-uuid",
+    }))).toBeNull();
   });
 
   it("migra un estado legacy pausado y suma solo el segmento tras reanudar", () => {
@@ -416,21 +546,91 @@ describe("persistencia recuperable del temporizador", () => {
 });
 
 describe("getPomodoroSessionSeconds", () => {
-  it("usa el tiempo activo en sesiones nuevas y planificado como fallback explícito para legacy", () => {
+  it("suma actividad de cualquier fase y limita el fallback histórico a WORK completado con cero", () => {
     expect(getPomodoroSessionSeconds({
       phase: "WORK",
       actualSeconds: 600,
       plannedSeconds: 1500,
+      completed: true,
     })).toBe(600);
     expect(getPomodoroSessionSeconds({
       phase: "WORK",
       actualSeconds: 0,
       plannedSeconds: 1500,
+      completed: true,
     })).toBe(1500);
     expect(getPomodoroSessionSeconds({
       phase: "SHORT_BREAK",
       actualSeconds: 300,
       plannedSeconds: 300,
+      completed: true,
+    })).toBe(300);
+    expect(getPomodoroSessionSeconds({
+      phase: "WORK",
+      actualSeconds: 0,
+      plannedSeconds: 1500,
+      completed: false,
     })).toBe(0);
+    expect(getPomodoroSessionSeconds({
+      phase: "LONG_BREAK",
+      actualSeconds: 0,
+      plannedSeconds: 900,
+      completed: true,
+    })).toBe(0);
+  });
+});
+
+describe("getPomodoroStatistics", () => {
+  it("separa duración activa de todas las fases del conteo WORK completado por día local de inicio", () => {
+    const sessions = [
+      {
+        phase: "WORK",
+        completed: true,
+        actualSeconds: 300,
+        plannedSeconds: 1500,
+        startedAt: new Date("2026-10-13T06:30:00Z"), // 23:30 del día 12 local
+      },
+      {
+        phase: "WORK",
+        completed: false,
+        actualSeconds: 120,
+        plannedSeconds: 1500,
+        startedAt: new Date("2026-10-13T07:30:00Z"), // 00:30 del día 13 local
+      },
+      {
+        phase: "SHORT_BREAK",
+        completed: false,
+        actualSeconds: 60,
+        plannedSeconds: 300,
+        startedAt: new Date("2026-10-13T08:00:00Z"),
+      },
+      {
+        phase: "LONG_BREAK",
+        completed: true,
+        actualSeconds: 0,
+        plannedSeconds: 900,
+        startedAt: new Date("2026-10-13T08:30:00Z"),
+      },
+      {
+        phase: "WORK",
+        completed: true,
+        actualSeconds: 0,
+        plannedSeconds: 900,
+        startedAt: new Date("2026-10-13T09:00:00Z"),
+      },
+    ];
+
+    expect(getPomodoroStatistics(sessions, "2026-10-12", "America/Los_Angeles"))
+      .toEqual({
+        totalActiveSeconds: 1380,
+        completedWorkSessionsToday: 1,
+        todayActiveWorkSeconds: 300,
+      });
+    expect(getPomodoroStatistics(sessions, "2026-10-13", "America/Los_Angeles"))
+      .toEqual({
+        totalActiveSeconds: 1380,
+        completedWorkSessionsToday: 1,
+        todayActiveWorkSeconds: 1020,
+      });
   });
 });

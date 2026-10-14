@@ -6,17 +6,23 @@ import { completePomodoroAction } from "@/app/actions/pomodoro";
 import { Button, Card } from "@/components/ui";
 import { toDateKey } from "@/lib/date";
 import {
-  calculateActiveSeconds,
+  calculateActualSeconds,
   getCompletedWorkSessionsTodayAfterCompletion,
   getNextPomodoroPhase,
   parsePomodoroState,
   recoverPomodoroState,
   serializePomodoroState,
+  type ActiveTimeSegment,
+  type PomodoroPhaseRegistration,
   type StoredPomodoroState,
 } from "@/lib/pomodoro";
 import {
+  closePomodoroActiveSegment,
+  createSingleFlightPomodoroRegistration,
   createCompletionStopSignal,
   finishPomodoroPhase,
+  getPomodoroTaskAssignment,
+  submitPomodoroPhaseRegistration,
   type CompletionStopIntent,
 } from "@/lib/pomodoro-completion";
 import { cn } from "@/lib/utils";
@@ -37,11 +43,14 @@ type Bootstrap = {
   endAt: number;
   taskId: string | null;
   cycleTaskId: string | null;
+  sessionId: string | null;
+  activeSegments: readonly ActiveTimeSegment[];
   accumulatedActiveSeconds: number;
   segmentStartedAt: number | null;
   sessionStartedAt: number | null;
   savedAt: number;
   status: string | null;
+  pendingRegistration: PomodoroPhaseRegistration | null;
 };
 
 type Prefs = {
@@ -138,6 +147,30 @@ export function PomodoroClient({
   const [bootstrap] = useState<Bootstrap>(() => {
     const stored = readStorage();
     const now = Date.now();
+    const pendingRegistration = stored?.pendingRegistration ?? null;
+
+    // Un registro terminal no expira junto con una fase en curso: conserva el
+    // payload original hasta que el servidor confirme un reintento idempotente.
+    if (stored && pendingRegistration) {
+      return {
+        mode: pendingRegistration.phase,
+        plannedSeconds: pendingRegistration.plannedSeconds,
+        remaining: pendingRegistration.plannedSeconds,
+        running: false,
+        paused: false,
+        endAt: 0,
+        taskId: pendingRegistration.phase === "WORK" ? pendingRegistration.taskId : null,
+        cycleTaskId: pendingRegistration.taskId ?? stored.cycleTaskId ?? null,
+        sessionId: pendingRegistration.sessionId,
+        activeSegments: pendingRegistration.activeSegments,
+        accumulatedActiveSeconds: calculateActualSeconds(pendingRegistration.activeSegments),
+        segmentStartedAt: null,
+        sessionStartedAt: pendingRegistration.startedAt,
+        savedAt: stored.savedAt,
+        status: "Registro pendiente · reintenta para confirmar la fase",
+        pendingRegistration,
+      };
+    }
     const recovered = recoverPomodoroState(stored, now, MAX_PAUSE_MS);
 
     if (recovered && recovered.endAt > 0) {
@@ -150,11 +183,14 @@ export function PomodoroClient({
         endAt: recovered.endAt,
         taskId: recovered.taskId,
         cycleTaskId: recovered.cycleTaskId ?? recovered.taskId,
+        sessionId: recovered.sessionId ?? null,
+        activeSegments: recovered.activeSegments ?? [],
         accumulatedActiveSeconds: recovered.accumulatedActiveSeconds,
         segmentStartedAt: recovered.segmentStartedAt,
         sessionStartedAt: recovered.sessionStartedAt,
         savedAt: recovered.savedAt,
         status: `Sesión reanudada · ${MODE_LABEL[recovered.mode].toLowerCase()}`,
+        pendingRegistration: null,
       };
     }
 
@@ -168,11 +204,14 @@ export function PomodoroClient({
         endAt: 0,
         taskId: recovered.taskId,
         cycleTaskId: recovered.cycleTaskId ?? recovered.taskId,
+        sessionId: recovered.sessionId ?? null,
+        activeSegments: recovered.activeSegments ?? [],
         accumulatedActiveSeconds: recovered.accumulatedActiveSeconds,
         segmentStartedAt: null,
         sessionStartedAt: recovered.sessionStartedAt,
         savedAt: recovered.savedAt,
         status: "Sesión en pausa reanudada",
+        pendingRegistration: null,
       };
     }
 
@@ -185,11 +224,14 @@ export function PomodoroClient({
       endAt: 0,
       taskId: null,
       cycleTaskId: null,
+      sessionId: null,
+      activeSegments: [],
       accumulatedActiveSeconds: 0,
       segmentStartedAt: null,
       sessionStartedAt: null,
       savedAt: 0,
       status: null,
+      pendingRegistration: null,
     };
   });
 
@@ -204,16 +246,25 @@ export function PomodoroClient({
   const [totalDone, setTotalDone] = useState(totalPomodoros);
   const [totalMin, setTotalMin] = useState(totalMinutes);
   const [completionPending, setCompletionPending] = useState(false);
+  const [abandonPending, setAbandonPending] = useState(false);
   const [completionStopIntent, setCompletionStopIntent] =
     useState<CompletionStopIntent | null>(null);
+  const [pendingRegistration, setPendingRegistration] = useState<PomodoroPhaseRegistration | null>(
+    bootstrap.pendingRegistration,
+  );
 
   const endAtRef = useRef<number>(bootstrap.endAt);
   const plannedRef = useRef<number>(bootstrap.plannedSeconds);
   const taskIdRef = useRef<string | null>(bootstrap.taskId);
   const cycleTaskIdRef = useRef<string | null>(bootstrap.cycleTaskId);
+  const sessionIdRef = useRef<string | null>(bootstrap.sessionId);
+  const activeSegmentsRef = useRef<readonly ActiveTimeSegment[]>(bootstrap.activeSegments);
   const accumulatedActiveSecondsRef = useRef<number>(bootstrap.accumulatedActiveSeconds);
   const segmentStartedAtRef = useRef<number | null>(bootstrap.segmentStartedAt);
   const sessionStartedAtRef = useRef<number | null>(bootstrap.sessionStartedAt);
+  const pendingRegistrationRef = useRef<PomodoroPhaseRegistration | null>(
+    bootstrap.pendingRegistration,
+  );
   const finishedRef = useRef(false);
   const completionInFlightRef = useRef(false);
   const completionStopSignalRef = useRef(createCompletionStopSignal());
@@ -221,6 +272,9 @@ export function PomodoroClient({
   const completedTodayDateRef = useRef(today);
 
   const completionRef = useRef<() => Promise<void>>(async () => {});
+  const phaseRegistrationRef = useRef(
+    createSingleFlightPomodoroRegistration(completePomodoroAction),
+  );
 
   function startPhase(
     nextMode: Mode,
@@ -240,6 +294,9 @@ export function PomodoroClient({
     taskIdRef.current = nextMode === "WORK" ? assignedTaskId : null;
     setTaskId(nextMode === "WORK" ? assignedTaskId : null);
     cycleTaskIdRef.current = cycleTaskId;
+    const sessionId = crypto.randomUUID();
+    sessionIdRef.current = sessionId;
+    activeSegmentsRef.current = [];
     accumulatedActiveSecondsRef.current = 0;
     segmentStartedAtRef.current = now;
     sessionStartedAtRef.current = now;
@@ -255,6 +312,8 @@ export function PomodoroClient({
       remainingSeconds: seconds,
       plannedSeconds: seconds,
       taskId: nextMode === "WORK" ? assignedTaskId : null,
+      sessionId,
+      activeSegments: [],
       cycleTaskId,
       accumulatedActiveSeconds: 0,
       segmentStartedAt: now,
@@ -274,8 +333,60 @@ export function PomodoroClient({
   }
 
   function start() {
-    const assignedTaskId = mode === "WORK" ? taskIdRef.current : null;
-    startPhase(mode, assignedTaskId, assignedTaskId, true);
+    if (pendingRegistrationRef.current) return;
+    const assignment = getPomodoroTaskAssignment(
+      mode,
+      taskIdRef.current,
+      cycleTaskIdRef.current,
+    );
+    startPhase(mode, assignment.taskId, assignment.cycleTaskId, true);
+  }
+
+  function persistPendingRegistration(registration: PomodoroPhaseRegistration) {
+    pendingRegistrationRef.current = registration;
+    setPendingRegistration(registration);
+    const savedAt = Date.now();
+    writeStorage({
+      mode: registration.phase,
+      endAt: 0,
+      remainingSeconds: Math.max(1, plannedRef.current),
+      plannedSeconds: registration.plannedSeconds,
+      taskId: registration.phase === "WORK" ? registration.taskId : null,
+      sessionId: registration.sessionId,
+      activeSegments: registration.activeSegments,
+      cycleTaskId: registration.taskId ?? cycleTaskIdRef.current,
+      accumulatedActiveSeconds: calculateActualSeconds(registration.activeSegments),
+      segmentStartedAt: null,
+      sessionStartedAt: registration.startedAt,
+      savedAt,
+      pendingRegistration: registration,
+    });
+  }
+
+  async function retryPendingRegistration() {
+    const registration = pendingRegistrationRef.current;
+    if (!registration || completionInFlightRef.current) return;
+
+    completionInFlightRef.current = true;
+    setCompletionPending(true);
+    setAbandonPending(!registration.completed);
+    const result = await submitPomodoroPhaseRegistration(
+      registration,
+      phaseRegistrationRef.current,
+    );
+    if (result.ok) {
+      pendingRegistrationRef.current = null;
+      // Tras una respuesta incierta, los props pueden ya incluir el commit de
+      // la primera solicitud. Recargar evita sumar dos veces las métricas UI.
+      clearStorage();
+      window.location.reload();
+      return;
+    } else {
+      setStatus(result.error ?? "No se pudo guardar la fase.");
+    }
+    setCompletionPending(false);
+    setAbandonPending(false);
+    completionInFlightRef.current = false;
   }
 
   function pause() {
@@ -293,11 +404,12 @@ export function PomodoroClient({
     const secondsLeft = endAtRef.current
       ? Math.max(1, Math.ceil((endAtRef.current - now) / 1000))
       : remaining;
-    const activeSeconds = calculateActiveSeconds(
-      accumulatedActiveSecondsRef.current,
+    activeSegmentsRef.current = closePomodoroActiveSegment(
+      activeSegmentsRef.current,
       segmentStartedAtRef.current,
       now,
     );
+    const activeSeconds = calculateActualSeconds(activeSegmentsRef.current);
 
     accumulatedActiveSecondsRef.current = activeSeconds;
     segmentStartedAtRef.current = null;
@@ -313,6 +425,8 @@ export function PomodoroClient({
       remainingSeconds: secondsLeft,
       plannedSeconds: plannedRef.current,
       taskId: taskIdRef.current,
+      sessionId: sessionIdRef.current,
+      activeSegments: activeSegmentsRef.current,
       cycleTaskId: cycleTaskIdRef.current,
       accumulatedActiveSeconds: activeSeconds,
       segmentStartedAt: null,
@@ -330,6 +444,9 @@ export function PomodoroClient({
     if (sessionStartedAtRef.current === null) {
       sessionStartedAtRef.current = now;
     }
+    if (sessionIdRef.current === null) {
+      sessionIdRef.current = crypto.randomUUID();
+    }
 
     endAtRef.current = endAt;
     segmentStartedAtRef.current = now;
@@ -344,6 +461,8 @@ export function PomodoroClient({
       remainingSeconds: remaining,
       plannedSeconds: plannedRef.current,
       taskId: taskIdRef.current,
+      sessionId: sessionIdRef.current,
+      activeSegments: activeSegmentsRef.current,
       cycleTaskId: cycleTaskIdRef.current,
       accumulatedActiveSeconds: accumulatedActiveSecondsRef.current,
       segmentStartedAt: now,
@@ -353,7 +472,7 @@ export function PomodoroClient({
   }
 
   function selectMode(nextMode: Mode) {
-    if (running || paused || completionInFlightRef.current) {
+    if (running || paused || completionInFlightRef.current || pendingRegistrationRef.current) {
       return;
     }
 
@@ -366,11 +485,16 @@ export function PomodoroClient({
       taskIdRef.current = null;
       setTaskId(null);
     }
-    cycleTaskIdRef.current = null;
   }
 
   function selectTask(nextTaskId: string | null) {
-    if (running || paused || completionInFlightRef.current || mode !== "WORK") {
+    if (
+      running ||
+      paused ||
+      completionInFlightRef.current ||
+      pendingRegistrationRef.current ||
+      mode !== "WORK"
+    ) {
       return;
     }
 
@@ -389,23 +513,89 @@ export function PomodoroClient({
       return;
     }
 
+    if (!running && !paused) return;
+    completionInFlightRef.current = true;
     finishedRef.current = true;
-    endAtRef.current = 0;
-    taskIdRef.current = null;
-    cycleTaskIdRef.current = null;
-    accumulatedActiveSecondsRef.current = 0;
-    segmentStartedAtRef.current = null;
-    sessionStartedAtRef.current = null;
-    setRunning(false);
-    setPaused(false);
-    setTaskId(null);
-    setStatus("Sesión anulada (no se registra)");
-    clearStorage();
+    completionStopSignalRef.current.reset();
+    const endedAt = Date.now();
+    const startedAt = sessionStartedAtRef.current ?? segmentStartedAtRef.current ?? endedAt;
+    const sessionId = sessionIdRef.current ?? crypto.randomUUID();
+    const activeSegments = closePomodoroActiveSegment(
+      activeSegmentsRef.current,
+      segmentStartedAtRef.current,
+      endedAt,
+    );
+    const secondsLeft = running && endAtRef.current
+      ? Math.max(1, Math.ceil((endAtRef.current - endedAt) / 1000))
+      : remaining;
 
-    const seconds = plannedFor(mode);
-    setPlannedSeconds(seconds);
-    plannedRef.current = seconds;
-    setRemaining(seconds);
+    sessionIdRef.current = sessionId;
+    activeSegmentsRef.current = activeSegments;
+    sessionStartedAtRef.current = startedAt;
+    segmentStartedAtRef.current = null;
+    endAtRef.current = 0;
+    const abandonedActiveSeconds = calculateActualSeconds(activeSegments);
+    accumulatedActiveSecondsRef.current = abandonedActiveSeconds;
+    setRunning(false);
+    setPaused(true);
+    setRemaining(secondsLeft);
+    setCompletionPending(true);
+    setAbandonPending(true);
+    setStatus("Registrando la fase abandonada…");
+    writeStorage({
+      mode,
+      endAt: 0,
+      remainingSeconds: secondsLeft,
+      plannedSeconds: plannedRef.current,
+      taskId: taskIdRef.current,
+      sessionId,
+      activeSegments,
+      cycleTaskId: cycleTaskIdRef.current,
+      accumulatedActiveSeconds: accumulatedActiveSecondsRef.current,
+      segmentStartedAt: null,
+      sessionStartedAt: startedAt,
+      savedAt: endedAt,
+    });
+
+    const registration: PomodoroPhaseRegistration = {
+      sessionId,
+      phase: mode,
+      plannedSeconds: plannedRef.current,
+      startedAt,
+      endedAt,
+      activeSegments,
+      completed: false,
+      taskId: cycleTaskIdRef.current,
+    };
+    persistPendingRegistration(registration);
+    void submitPomodoroPhaseRegistration(registration, phaseRegistrationRef.current)
+      .then((result) => {
+        if (result.ok) {
+          setTotalMin((current) => current + abandonedActiveSeconds / 60);
+          pendingRegistrationRef.current = null;
+          setPendingRegistration(null);
+          taskIdRef.current = null;
+          cycleTaskIdRef.current = null;
+          sessionIdRef.current = null;
+          activeSegmentsRef.current = [];
+          accumulatedActiveSecondsRef.current = 0;
+          segmentStartedAtRef.current = null;
+          sessionStartedAtRef.current = null;
+          setTaskId(null);
+          setPaused(false);
+          clearStorage();
+          setStatus("Fase abandonada y registrada.");
+          const seconds = plannedFor(mode);
+          setPlannedSeconds(seconds);
+          plannedRef.current = seconds;
+          setRemaining(seconds);
+        } else {
+          setStatus(result.error ?? "No se pudo guardar la fase abandonada.");
+        }
+        setCompletionPending(false);
+        setAbandonPending(false);
+        completionInFlightRef.current = false;
+      });
   }
 
   function notify(title: string, body: string) {
@@ -437,22 +627,20 @@ export function PomodoroClient({
 
     const phase = mode;
     const seconds = plannedRef.current;
-    const actualSeconds = Math.max(
-      1,
-      Math.min(
-        seconds,
-        calculateActiveSeconds(
-          accumulatedActiveSecondsRef.current,
-          segmentStartedAtRef.current,
-          Date.now(),
-        ),
-      ),
-    );
-    const endedAtDate = new Date();
-    const endedAt = endedAtDate.toISOString();
+    const endedAtTimestamp = Date.now();
+    const endedAtDate = new Date(endedAtTimestamp);
     const currentDay = toDateKey(endedAtDate, timeZone);
     const sessionStartedAt =
       sessionStartedAtRef.current ?? segmentStartedAtRef.current ?? endedAtDate.getTime();
+    const sessionId = sessionIdRef.current ?? crypto.randomUUID();
+    const activeSegments = closePomodoroActiveSegment(
+      activeSegmentsRef.current,
+      segmentStartedAtRef.current,
+      endedAtTimestamp,
+    );
+    const actualSeconds = calculateActualSeconds(activeSegments);
+    sessionIdRef.current = sessionId;
+    activeSegmentsRef.current = activeSegments;
     const cycleTaskId = cycleTaskIdRef.current;
     const workStartedDay = phase === "WORK"
       ? toDateKey(new Date(sessionStartedAt), timeZone)
@@ -492,21 +680,18 @@ export function PomodoroClient({
           phase === "WORK" ? "Toca descanso, lo has ganado." : "Es hora de volver al foco.",
         ),
       register: async (assignedTaskId) => {
-        const formData = new FormData();
-        formData.set("phase", phase);
-        formData.set("plannedSeconds", String(seconds));
-        formData.set("actualSeconds", String(actualSeconds));
-        formData.set("startedAt", new Date(sessionStartedAt).toISOString());
-        formData.set("endedAt", endedAt);
-        if (assignedTaskId) {
-          formData.set("taskId", assignedTaskId);
-        }
-
-        try {
-          return await completePomodoroAction(formData);
-        } catch {
-          return { ok: false, error: "No se pudo guardar la sesión." };
-        }
+        const registration: PomodoroPhaseRegistration = {
+          sessionId,
+          phase,
+          plannedSeconds: seconds,
+          startedAt: sessionStartedAt,
+          endedAt: endedAtTimestamp,
+          activeSegments,
+          completed: true,
+          taskId: assignedTaskId,
+        };
+        persistPendingRegistration(registration);
+        return submitPomodoroPhaseRegistration(registration, phaseRegistrationRef.current);
       },
       canContinue: completionStopSignalRef.current.canContinue,
     });
@@ -519,16 +704,20 @@ export function PomodoroClient({
       : countWithoutThisPhase;
     setCompletedToday(completedTodayRef.current);
     if (result.ok) {
-      if (phase === "WORK") {
-        setTotalMin(totalMin + actualSeconds / 60);
-      }
-      setTotalDone(totalDone + 1);
+      setTotalMin((current) => current + actualSeconds / 60);
+      setTotalDone((current) => current + 1);
     }
 
-    endAtRef.current = 0;
-    accumulatedActiveSecondsRef.current = 0;
-    segmentStartedAtRef.current = null;
-    sessionStartedAtRef.current = null;
+    if (result.ok) {
+      pendingRegistrationRef.current = null;
+      setPendingRegistration(null);
+      endAtRef.current = 0;
+      accumulatedActiveSecondsRef.current = 0;
+      segmentStartedAtRef.current = null;
+      sessionStartedAtRef.current = null;
+      activeSegmentsRef.current = [];
+      sessionIdRef.current = null;
+    }
 
     if (result.ok && outcome.nextMode) {
       const nextMode = outcome.nextMode;
@@ -542,14 +731,16 @@ export function PomodoroClient({
         nextStatus,
       );
     } else {
-      taskIdRef.current = null;
-      cycleTaskIdRef.current = null;
-      setTaskId(null);
       setRunning(false);
       setPaused(false);
-      clearStorage();
 
       if (result.ok) {
+        taskIdRef.current = null;
+        setTaskId(null);
+        clearStorage();
+        if (stopIntent === "cancel") {
+          cycleTaskIdRef.current = null;
+        }
         setStatus(
           stopIntent === "cancel"
             ? "Fase completada registrada; ciclo abandonado."
@@ -573,7 +764,7 @@ export function PomodoroClient({
         }
       } else {
         const message = result.error ?? "No se pudo guardar la sesión.";
-        setStatus(stopIntent ? `${message} Auto-avance detenido.` : message);
+        setStatus(`${message} El payload se conserva para reintentar.`);
       }
     }
 
@@ -605,6 +796,8 @@ export function PomodoroClient({
       remainingSeconds,
       plannedSeconds: bootstrap.plannedSeconds,
       taskId: bootstrap.taskId,
+      sessionId: bootstrap.sessionId,
+      activeSegments: bootstrap.activeSegments,
       cycleTaskId: bootstrap.cycleTaskId,
       accumulatedActiveSeconds: bootstrap.accumulatedActiveSeconds,
       segmentStartedAt: bootstrap.running ? bootstrap.segmentStartedAt : null,
@@ -614,7 +807,7 @@ export function PomodoroClient({
   }, [bootstrap]);
 
   useEffect(() => {
-    if (!running && !paused && readStorage()) {
+    if (!running && !paused && !pendingRegistrationRef.current && readStorage()) {
       clearStorage();
     }
   }, [running, paused]);
@@ -662,9 +855,9 @@ export function PomodoroClient({
             /{prefs.dailyPomodoroGoal}
           </span>
           <span className="text-muted-foreground">
-            Total <strong className="font-semibold text-foreground">{totalDone}</strong>
-            {" · "}
-            {Math.round(totalMin)} min
+            Sesiones <strong className="font-semibold text-foreground">{totalDone}</strong>
+            {" · Activo "}
+            <strong className="font-semibold text-foreground">{Math.round(totalMin)} min</strong>
           </span>
         </div>
       </div>
@@ -676,7 +869,7 @@ export function PomodoroClient({
               key={item}
               type="button"
               onClick={() => selectMode(item)}
-              disabled={running || paused}
+              disabled={running || paused || Boolean(pendingRegistration)}
               className={cn(
                 "rounded-full px-3 py-1 text-xs font-medium transition-colors",
                 mode === item
@@ -695,7 +888,7 @@ export function PomodoroClient({
             <select
               value={taskId ?? ""}
               onChange={(event) => selectTask(event.target.value || null)}
-              disabled={running || paused}
+              disabled={running || paused || Boolean(pendingRegistration)}
               className="h-10 rounded-lg border border-border bg-background px-3 text-sm disabled:cursor-not-allowed disabled:opacity-60"
             >
               <option value="">Sin tarea asignada</option>
@@ -750,7 +943,23 @@ export function PomodoroClient({
         </svg>
 
         <div className="flex flex-wrap items-center justify-center gap-3">
-          {completionPending ? completionStopIntent ? (
+          {pendingRegistration ? (
+            <Button
+              onClick={retryPendingRegistration}
+              disabled={completionPending}
+              className="min-w-36"
+            >
+              {completionPending
+                ? abandonPending
+                  ? "Reintentando abandono…"
+                  : "Reintentando registro…"
+                : "Reintentar registro"}
+            </Button>
+          ) : completionPending ? abandonPending ? (
+            <p className="text-center text-sm text-muted-foreground" role="status">
+              Registrando el abandono de la fase…
+            </p>
+          ) : completionStopIntent ? (
             <p className="text-center text-sm text-muted-foreground" role="status">
               {completionStopIntent === "pause"
                 ? "Pausa solicitada; esperando el registro de la fase completada."
@@ -779,8 +988,8 @@ export function PomodoroClient({
               <Button onClick={resume} className="min-w-28">
                 Reanudar
               </Button>
-              <Button variant="ghost" onClick={cancel}>
-                Anular
+              <Button variant="ghost" onClick={cancel} disabled={abandonPending}>
+                Abandonar
               </Button>
             </>
           ) : (

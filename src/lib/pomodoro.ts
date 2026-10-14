@@ -1,6 +1,19 @@
 import { toDateKey } from "@/lib/date";
 
 export type PomodoroPhase = "WORK" | "SHORT_BREAK" | "LONG_BREAK";
+export type ActiveTimeSegment = readonly [startedAt: number, endedAt: number];
+export type PomodoroPhaseRegistration = {
+  sessionId: string;
+  phase: PomodoroPhase;
+  plannedSeconds: number;
+  startedAt: number;
+  endedAt: number;
+  activeSegments: readonly ActiveTimeSegment[];
+  completed: boolean;
+  taskId: string | null;
+};
+
+export const MAX_TASK_SECONDS_PER_PHASE = 28_800;
 
 export type StoredPomodoroState = {
   mode: PomodoroPhase;
@@ -8,6 +21,10 @@ export type StoredPomodoroState = {
   remainingSeconds: number;
   plannedSeconds: number;
   taskId: string | null;
+  /** UUID estable de la fase; los estados anteriores a T003 no lo tienen. */
+  sessionId?: string | null;
+  /** Tramos activos ya cerrados, expresados como pares de epoch-ms. */
+  activeSegments?: readonly ActiveTimeSegment[];
   /** Tarea del foco actual para poder heredarla tras un descanso automático. */
   cycleTaskId?: string | null;
   accumulatedActiveSeconds: number;
@@ -15,6 +32,8 @@ export type StoredPomodoroState = {
   /** Inicio original de esta fase; no cambia al pausar ni al reanudar. */
   sessionStartedAt: number | null;
   savedAt: number;
+  /** Payload terminal inmutable que se conserva hasta confirmar su registro. */
+  pendingRegistration?: PomodoroPhaseRegistration | null;
 };
 
 export type RecoveredPomodoroState = StoredPomodoroState & {
@@ -112,15 +131,133 @@ export function getPomodoroSessionSeconds(session: {
   phase: string;
   actualSeconds: number;
   plannedSeconds: number;
+  completed: boolean;
 }): number {
-  if (session.phase !== "WORK") {
+  if (Number.isFinite(session.actualSeconds) && session.actualSeconds > 0) {
+    return Math.floor(session.actualSeconds);
+  }
+
+  if (
+    session.phase === "WORK" &&
+    session.completed &&
+    session.actualSeconds === 0 &&
+    Number.isFinite(session.plannedSeconds)
+  ) {
+    return Math.max(0, Math.floor(session.plannedSeconds));
+  }
+
+  return 0;
+}
+
+/** Resume las métricas Pomodoro sin mezclar duración activa y objetivos. */
+export function getPomodoroStatistics(
+  sessions: readonly {
+    phase: string;
+    completed: boolean;
+    actualSeconds: number;
+    plannedSeconds: number;
+    startedAt: Date;
+  }[],
+  today: string,
+  timeZone: string,
+): {
+  totalActiveSeconds: number;
+  completedWorkSessionsToday: number;
+  todayActiveWorkSeconds: number;
+} {
+  return {
+    totalActiveSeconds: sessions.reduce(
+      (total, session) => total + getPomodoroSessionSeconds(session),
+      0,
+    ),
+    completedWorkSessionsToday: countCompletedWorkSessionsForDay(
+      sessions,
+      today,
+      timeZone,
+    ),
+    todayActiveWorkSeconds: sessions.reduce((total, session) => {
+      if (
+        session.phase !== "WORK" ||
+        toDateKey(session.startedAt, timeZone) !== today
+      ) {
+        return total;
+      }
+
+      return total + getPomodoroSessionSeconds(session);
+    }, 0),
+  };
+}
+
+/**
+ * Comprueba que los intervalos activos estén cronológicamente ordenados,
+ * dentro de la fase y no se solapen. Los extremos iguales entre segmentos son
+ * válidos; un segmento individual debe tener duración positiva.
+ */
+export function isValidActiveSegments(
+  sessionStartedAt: number,
+  sessionEndedAt: number,
+  segments: readonly ActiveTimeSegment[],
+): boolean {
+  if (
+    !Number.isFinite(sessionStartedAt) ||
+    !Number.isFinite(sessionEndedAt) ||
+    sessionEndedAt < sessionStartedAt ||
+    !Array.isArray(segments)
+  ) {
+    return false;
+  }
+
+  let previousEndedAt = sessionStartedAt;
+  for (const segment of segments) {
+    if (
+      !Array.isArray(segment) ||
+      segment.length !== 2 ||
+      !Number.isFinite(segment[0]) ||
+      !Number.isFinite(segment[1])
+    ) {
+      return false;
+    }
+
+    const [startedAt, endedAt] = segment;
+    if (
+      startedAt < sessionStartedAt ||
+      endedAt > sessionEndedAt ||
+      startedAt < previousEndedAt ||
+      endedAt <= startedAt
+    ) {
+      return false;
+    }
+    previousEndedAt = endedAt;
+  }
+
+  return true;
+}
+
+/** Suma los milisegundos activos y trunca una sola vez a segundos completos. */
+export function calculateActualSeconds(
+  segments: readonly ActiveTimeSegment[],
+): number {
+  const totalMilliseconds = segments.reduce((total, [startedAt, endedAt]) => {
+    const duration = endedAt - startedAt;
+    return Number.isFinite(duration) && duration > 0 ? total + duration : total;
+  }, 0);
+
+  return Math.floor(totalMilliseconds / 1000);
+}
+
+/** Segundos de pared imputables a una tarea, con tope independiente por fase. */
+export function calculateTaskWallSeconds(
+  startedAt: number,
+  endedAt: number,
+): number {
+  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || endedAt < startedAt) {
     return 0;
   }
 
-  const seconds = Number.isInteger(session.actualSeconds) && session.actualSeconds > 0
-    ? session.actualSeconds
-    : session.plannedSeconds;
-  return Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+  return Math.min(
+    MAX_TASK_SECONDS_PER_PHASE,
+    Math.floor((endedAt - startedAt) / 1000),
+  );
 }
 
 /**
@@ -168,6 +305,74 @@ export function canResumePomodoro(
 export function serializePomodoroState(state: StoredPomodoroState): string {
   return JSON.stringify(state);
 }
+
+function isValidPendingRegistration(value: unknown): value is PomodoroPhaseRegistration {
+  if (!value || typeof value !== "object") return false;
+  const registration = value as Partial<PomodoroPhaseRegistration>;
+  if (
+    typeof registration.sessionId !== "string" ||
+    !UUID_PATTERN.test(registration.sessionId) ||
+    (registration.phase !== "WORK" &&
+      registration.phase !== "SHORT_BREAK" &&
+      registration.phase !== "LONG_BREAK") ||
+    !Number.isSafeInteger(registration.plannedSeconds) ||
+    (registration.plannedSeconds ?? 0) <= 0 ||
+    !Number.isSafeInteger(registration.startedAt) ||
+    !Number.isSafeInteger(registration.endedAt) ||
+    (registration.endedAt ?? 0) < (registration.startedAt ?? 0) ||
+    typeof registration.completed !== "boolean" ||
+    !(registration.taskId === null || typeof registration.taskId === "string") ||
+    !Array.isArray(registration.activeSegments) ||
+    !isValidActiveSegments(
+      registration.startedAt as number,
+      registration.endedAt as number,
+      registration.activeSegments,
+    ) ||
+    (registration.completed && calculateActualSeconds(registration.activeSegments) < 1)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function isValidStoredActiveSegments(
+  value: unknown,
+  sessionStartedAt: number | null,
+  segmentStartedAt: number | null,
+  savedAt: number,
+): value is readonly ActiveTimeSegment[] {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+
+  let previousEndedAt = sessionStartedAt ?? Number.NEGATIVE_INFINITY;
+  for (const segment of value) {
+    if (
+      !Array.isArray(segment) ||
+      segment.length !== 2 ||
+      !Number.isSafeInteger(segment[0]) ||
+      !Number.isSafeInteger(segment[1])
+    ) {
+      return false;
+    }
+
+    const [startedAt, endedAt] = segment;
+    if (
+      startedAt < previousEndedAt ||
+      endedAt <= startedAt ||
+      (savedAt > 0 && endedAt > savedAt) ||
+      (segmentStartedAt !== null && endedAt > segmentStartedAt)
+    ) {
+      return false;
+    }
+    previousEndedAt = endedAt;
+  }
+
+  return true;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
  * Lee estados nuevos y los estados previos al seguimiento de tareas/tiempo.
@@ -218,6 +423,36 @@ export function parsePomodoroState(raw: string): StoredPomodoroState | null {
       ? (stored.sessionStartedAt as number)
       : null;
     const savedAt = Number.isFinite(stored.savedAt) ? (stored.savedAt as number) : 0;
+    const sessionId = stored.sessionId === undefined || stored.sessionId === null
+      ? null
+      : typeof stored.sessionId === "string" && UUID_PATTERN.test(stored.sessionId)
+        ? stored.sessionId
+        : null;
+    if (
+      stored.sessionId !== undefined &&
+      stored.sessionId !== null &&
+      sessionId === null
+    ) {
+      return null;
+    }
+
+    const activeSegments = stored.activeSegments === undefined ? [] : stored.activeSegments;
+    if (!isValidStoredActiveSegments(
+      activeSegments,
+      sessionStartedAt,
+      segmentStartedAt,
+      savedAt,
+    )) {
+      return null;
+    }
+
+    const pendingRegistration = stored.pendingRegistration === undefined ||
+      stored.pendingRegistration === null
+      ? null
+      : isValidPendingRegistration(stored.pendingRegistration)
+        ? stored.pendingRegistration
+        : undefined;
+    if (pendingRegistration === undefined) return null;
 
     return {
       mode: stored.mode,
@@ -225,11 +460,14 @@ export function parsePomodoroState(raw: string): StoredPomodoroState | null {
       remainingSeconds,
       plannedSeconds,
       taskId,
+      sessionId,
+      activeSegments,
       cycleTaskId,
       accumulatedActiveSeconds,
       segmentStartedAt,
       sessionStartedAt,
       savedAt,
+      ...(pendingRegistration ? { pendingRegistration } : {}),
     };
   } catch {
     return null;
