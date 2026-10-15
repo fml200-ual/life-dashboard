@@ -10,8 +10,9 @@ estado está. Mantenerlo conciso y actualizado.
 ## Qué es
 
 Panel personal de productividad con **una sola cuenta** (registro cerrado):
-tareas con rachas por categoría, temporizador Pomodoro persistente, notas con
-autoguardado y ajustes. Sin registro público ni multiusuario.
+tareas con rachas por categoría, calendario propio de eventos y vencimientos,
+temporizador Pomodoro persistente, notas con autoguardado y ajustes. Sin
+registro público ni multiusuario.
 
 ## Stack
 
@@ -76,6 +77,12 @@ si se toca lógica).
   `src/generated/prisma` (gitignored) y se regenera en `postinstall`.
 - Fechas "de día" como cadenas locales `YYYY-MM-DD` (`src/lib/date.ts`);
   `dueDate` se guarda a medianoche UTC. Ver skill `local-dates`.
+- Calendario en `/calendar`: `CalendarEvent.dateKey` usa una fecha civil local
+  `YYYY-MM-DD` y `startMinutes`/`endMinutes` representan minutos locales desde
+  medianoche (fin exclusivo; 1440 es el final del día). Los eventos reutilizan
+  `Category`; las tareas por `dueDate` solo se superponen y no se mutan. El
+  dashboard muestra eventos de hoy a los siete días locales siguientes,
+  inclusive, con un máximo visible de cinco.
 - Pomodoro basado en timestamps (`endAt`), reanudable dentro de 24 h; las specs
   [`002-pomodoro-autostart-task-time`](specs/002-pomodoro-autostart-task-time/spec.md)
   y [`003-task-total-time`](specs/003-task-total-time/spec.md) definen auto-avance
@@ -93,6 +100,11 @@ si se toca lógica).
   `PomodoroSession.actualSeconds` (0) y `Task.accumulatedSeconds` (0). La lista
   de tareas y el dashboard muestran el acumulado con formato compartido.
 - `cacheComponents` desactivado (Next 16) para no cachear datos personales.
+- Calendario: la migración aditiva `20261015120000_calendar_events` crea
+  `CalendarEvent`, índices y relaciones de usuario/categoría (`Cascade` y
+  `SetNull`). Está creada y revisada en el repositorio, pero **pendiente de
+  aplicación**; no se ejecutó `db:deploy` ni se modificó una base de datos para
+  esta funcionalidad. Semántica y límites en [`docs/architecture.md`](docs/architecture.md).
 
 ## Estado
 
@@ -128,5 +140,15 @@ si se toca lógica).
   abandonos a cero aportan cero. Convergencia final: test (130 en 9 archivos),
   lint, typecheck, build y `git diff --check` verdes. No se desplegó ni se tocó
   la base de datos.
+- **Spec 004 — calendario integrado**: T001–T007 completadas; la suite tiene
+  203 tests en 14 archivos y la convergencia final de test, lint, typecheck,
+  build y `git diff --check` está verde. `/calendar` ofrece mes/agenda, eventos
+  locales con CRUD y categorías compartidas, superposición de tareas de solo
+  lectura, botón «Hoy» y tarjeta de próximos eventos en el dashboard. La
+  migración `20261015120000_calendar_events` fue generada y revisada, pero queda
+  pendiente de aplicación; no se desplegó la app ni se modificó ninguna base de
+  datos. La comprobación visual de escritorio y móvil no pudo ejecutarse porque
+  Chrome DevTools no encontró el ejecutable configurado; queda pendiente de
+  revisión visual manual.
 - **Pendiente**: limpieza de sesiones vencidas, integración Gmail/OAuth,
   etiquetas (`Tag`).

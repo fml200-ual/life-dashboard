@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Panel", icon: "◧" },
+  { href: "/calendar", label: "Calendario", icon: "▦" },
   { href: "/tasks", label: "Tareas", icon: "☑" },
   { href: "/pomodoro", label: "Pomodoro", icon: "◷" },
   { href: "/notes", label: "Notas", icon: "✎" },

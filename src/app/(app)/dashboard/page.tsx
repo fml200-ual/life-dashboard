@@ -6,6 +6,8 @@ import { prisma } from "@/lib/db";
 import { formatTaskTime } from "@/lib/task-time";
 import { requireUser } from "@/lib/auth";
 import { getPomodoroStatistics } from "@/lib/pomodoro";
+import { selectCalendarDate } from "@/lib/calendar";
+import { buildCalendarHref, formatLocalTime } from "@/lib/calendar-view";
 
 const STATUS_LABEL: Record<string, string> = {
   TODO: "Pendiente",
@@ -20,14 +22,10 @@ const PRIORITY_LABEL: Record<string, string> = {
   URGENT: "Urgente",
 };
 
-function longDateFromKey(dateKey: string): string {
-  const [year, month, day] = dateKey.split("-").map(Number);
+function formatCivilDate(dateKey: string): string {
+  const [year, month, day] = dateKey.split("-");
 
-  return new Intl.DateTimeFormat("es", {
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-  }).format(new Date(Date.UTC(year, month - 1, day)));
+  return `${day}-${month}-${year}`;
 }
 
 export default async function DashboardPage() {
@@ -35,7 +33,7 @@ export default async function DashboardPage() {
   const timeZone = user.timezone;
   const today = todayKey(timeZone);
 
-  const [tasks, categories, streakDays, prefs, pomodoros] = await Promise.all([
+  const [tasks, categories, streakDays, prefs, pomodoros, calendarEvents] = await Promise.all([
     prisma.task.findMany({
       where: { userId: user.id },
       orderBy: { createdAt: "asc" },
@@ -67,6 +65,25 @@ export default async function DashboardPage() {
         actualSeconds: true,
         plannedSeconds: true,
         startedAt: true,
+      },
+    }),
+    prisma.calendarEvent.findMany({
+      where: {
+        userId: user.id,
+        dateKey: { gte: today, lte: addDaysToKey(today, 7) },
+      },
+      orderBy: [
+        { dateKey: "asc" },
+        { allDay: "desc" },
+        { startMinutes: "asc" },
+      ],
+      select: {
+        id: true,
+        title: true,
+        dateKey: true,
+        allDay: true,
+        startMinutes: true,
+        category: { select: { name: true, color: true } },
       },
     }),
   ]);
@@ -125,7 +142,7 @@ export default async function DashboardPage() {
     <div className="space-y-6">
       <header>
         <h1 className="text-2xl font-semibold capitalize tracking-tight">
-          {longDateFromKey(today)}
+          {formatCivilDate(today)}
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
           {pendingTasks.length === 0
@@ -289,6 +306,54 @@ export default async function DashboardPage() {
           </CardContent>
         </Card>
       </section>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Próximos eventos</CardTitle>
+          <Link href="/calendar" className="text-xs text-muted-foreground hover:text-foreground">
+            Ver calendario →
+          </Link>
+        </CardHeader>
+        <CardContent>
+          {calendarEvents.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No hay eventos próximos.{" "}
+              <Link
+                href="/calendar"
+                className="font-medium text-foreground underline-offset-4 hover:underline"
+              >
+                Abre el calendario para planificar.
+              </Link>
+            </p>
+          ) : (
+            <ul className="divide-y divide-border">
+              {calendarEvents.slice(0, 5).map((event) => (
+                <li key={event.id} className="flex items-center gap-3 py-2.5">
+                  <span
+                    aria-hidden="true"
+                    className="h-2.5 w-2.5 shrink-0 rounded-full bg-primary"
+                    style={event.category ? { backgroundColor: event.category.color } : undefined}
+                  />
+                  <span className="min-w-0 flex-1 text-sm">
+                    <Link
+                      href={buildCalendarHref(selectCalendarDate(event.dateKey))}
+                      className="block truncate font-medium hover:underline"
+                    >
+                      {event.title}
+                    </Link>
+                    <span className="block text-xs text-muted-foreground">
+                      {formatCivilDate(event.dateKey)} · {event.allDay
+                        ? "Día completo"
+                        : formatLocalTime(event.startMinutes ?? 0)}
+                      {event.category ? ` · ${event.category.name}` : ""}
+                    </span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

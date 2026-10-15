@@ -34,6 +34,10 @@ propia y opaca.
   - `User.timezone` es la zona horaria del usuario (se usa para fechas "de día").
   - `UserPreferences` guarda tema, duración Pomodoro, objetivo diario y
     notificaciones.
+  - `CalendarEvent` guarda eventos propios de un solo día, con fecha civil local
+    (`dateKey`), campos horarios locales opcionales y categoría opcional. La
+    relación con `User` usa `Cascade`; al borrar una `Category`, el evento se
+    conserva con `categoryId = null` (`SetNull`).
   - `StreakDay` es un día de actividad por `(userId, categoryId)` con `date`
     como `YYYY-MM-DD` local; se incrementa al completar tareas de la categoría.
   - `PomodoroSession` registra fase, segundos planificados, inicio y fin.
@@ -50,6 +54,38 @@ propia y opaca.
   mismo día.
 - `computeStreak()` calcula racha actual (solo si el último día es hoy o ayer)
   y la más larga.
+
+## Calendario
+
+- `/calendar` es una ruta privada accesible desde la navegación principal. La
+  página valida `month` y `day` de la URL, usa `User.timezone` para establecer
+  el mes/día inicial y consultar únicamente las fechas de la cuadrícula visible.
+  El botón «Hoy» selecciona el día actual del usuario y su mes.
+- `CalendarEvent.dateKey` es una clave local `YYYY-MM-DD`, no un timestamp. Los
+  eventos son de un solo día y pueden ser de día completo (ambos minutos nulos)
+  o tener horario local expresado en minutos enteros desde medianoche.
+  `startMinutes` va de 0 a 1439; `endMinutes` es exclusivo, va de 1 a 1440 y debe
+  ser posterior al inicio. 1440 representa el final del mismo día; no se
+  convierten horas a UTC ni se admiten cruces de medianoche.
+- Las categorías son las entidades compartidas existentes con tareas. Las
+  Server Actions requieren sesión y validan propiedad del evento y de la
+  categoría; las lecturas también filtran por usuario. El calendario no modifica
+  tareas ni rachas. Las tareas con vencimiento se superponen como datos derivados
+  de solo lectura. La agenda separa tareas de eventos y ordena eventos de día
+  completo antes que los eventos horarios.
+- La vista ofrece mes lunes-domingo y agenda diaria, filtro de categorías
+  (incluido «sin categoría»), edición de eventos y desbordamiento visible en las
+  celdas. No incluye Google Calendar, recurrencia, recordatorios, eventos
+  multidía ni calendarios compartidos.
+- El dashboard consulta eventos locales desde hoy hasta siete días naturales
+  después, ambos inclusive, y presenta como máximo cinco con enlace al día del
+  evento en `/calendar`; mantiene un estado vacío con acceso al calendario.
+- La migración aditiva
+  `prisma/migrations/20261015120000_calendar_events/migration.sql` crea
+  `CalendarEvent`, índices por usuario/fecha y categoría y relaciones `Cascade`
+  y `SetNull`. Está creada y revisada localmente, pero **aún no se ha aplicado**
+  a ninguna base de datos. Antes de activar la funcionalidad en el entorno de
+  destino se debe aplicar mediante el proceso autorizado de despliegue de datos.
 
 ## Pomodoro (basado en timestamps)
 
@@ -106,7 +142,8 @@ propia y opaca.
 | ------------- | -------- | -------------------------------------------- |
 | `/`           | pública  | Redirige a `/login` o `/dashboard`           |
 | `/login`      | pública  | Inicio de sesión                             |
-| `/dashboard`  | privada  | Resumen del día, rachas y próximas tareas    |
+| `/dashboard`  | privada  | Resumen del día, rachas, eventos y tareas    |
+| `/calendar`   | privada  | Mes, agenda diaria, eventos y vencimientos   |
 | `/tasks`      | privada  | CRUD de tareas, categorías y estados         |
 | `/pomodoro`   | privada  | Temporizador y estadísticas                  |
 | `/notes`      | privada  | Notas con autoguardado                       |

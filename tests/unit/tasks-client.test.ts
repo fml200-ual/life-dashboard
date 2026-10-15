@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   findStreakDays: vi.fn(),
   findPreferences: vi.fn(),
   findPomodoros: vi.fn(),
+  findCalendarEvents: vi.fn(),
 }));
 
 vi.mock("@/app/actions/tasks", () => ({
@@ -31,6 +32,7 @@ vi.mock("@/lib/db", () => ({
     streakDay: { findMany: h.findStreakDays },
     userPreferences: { findUnique: h.findPreferences },
     pomodoroSession: { findMany: h.findPomodoros },
+    calendarEvent: { findMany: h.findCalendarEvents },
   },
 }));
 
@@ -63,6 +65,7 @@ beforeEach(() => {
   h.findStreakDays.mockResolvedValue([]);
   h.findPreferences.mockResolvedValue(null);
   h.findPomodoros.mockResolvedValue([]);
+  h.findCalendarEvents.mockResolvedValue([]);
 });
 
 describe("task list after create", () => {
@@ -166,5 +169,91 @@ describe("historical task-time notice", () => {
     const page = await DashboardPage();
 
     expect(renderToStaticMarkup(page)).toContain(historicalNotice);
+  });
+});
+
+describe("dashboard upcoming calendar events", () => {
+  it("queries only the user's events from local today through the seventh following day", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-15T02:30:00.000Z"));
+    h.requireUser.mockResolvedValue({ id: "user-1", timezone: "America/Los_Angeles" });
+
+    try {
+      await DashboardPage();
+
+      expect(h.findCalendarEvents).toHaveBeenCalledWith({
+        where: {
+          userId: "user-1",
+          dateKey: { gte: "2026-10-14", lte: "2026-10-21" },
+        },
+        orderBy: [
+          { dateKey: "asc" },
+          { allDay: "desc" },
+          { startMinutes: "asc" },
+        ],
+        select: {
+          id: true,
+          title: true,
+          dateKey: true,
+          allDay: true,
+          startMinutes: true,
+          category: { select: { name: true, color: true } },
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows event dates as civil dates and links to the first event's selected day", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-15T02:30:00.000Z"));
+    h.requireUser.mockResolvedValue({ id: "user-1", timezone: "America/Los_Angeles" });
+    h.findCalendarEvents.mockResolvedValue([
+      {
+        id: "event-1",
+        title: "Cita temprana",
+        dateKey: "2026-10-14",
+        allDay: false,
+        startMinutes: 570,
+        category: { name: "Personal", color: "#123456" },
+      },
+    ]);
+
+    try {
+      const markup = renderToStaticMarkup(await DashboardPage());
+
+      expect(markup).toContain("Próximos eventos");
+      expect(markup).toContain("Cita temprana");
+      expect(markup).toContain("14-10-2026");
+      expect(markup).not.toContain("13-10-2026");
+      expect(markup).not.toContain("15-10-2026");
+      expect(markup).toContain("09:30");
+      expect(markup).toContain('href="/calendar?month=2026-10&amp;day=2026-10-14"');
+      expect(markup).toContain('href="/calendar"');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("limits the card to five events and shows a useful empty state when none are upcoming", async () => {
+    const events = Array.from({ length: 6 }, (_, index) => ({
+      id: `event-${index + 1}`,
+      title: `Evento ${index + 1}`,
+      dateKey: "2026-10-15",
+      allDay: true,
+      startMinutes: null,
+      category: null,
+    }));
+    h.findCalendarEvents.mockResolvedValue(events);
+
+    const fullMarkup = renderToStaticMarkup(await DashboardPage());
+    expect(fullMarkup).toContain("Evento 5");
+    expect(fullMarkup).not.toContain("Evento 6");
+
+    h.findCalendarEvents.mockResolvedValue([]);
+    const emptyMarkup = renderToStaticMarkup(await DashboardPage());
+    expect(emptyMarkup).toContain("No hay eventos próximos.");
+    expect(emptyMarkup).toContain('href="/calendar"');
   });
 });
